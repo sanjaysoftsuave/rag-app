@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-app"
+version = "0.1.0"
+description = "Plain-Python RAG over support tickets: dense retrieve + cross-encoder rerank + grounded generation via OpenRouter"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "sentence-transformers>=3.0.0",
+  "torch>=2.0.0",
+  "numpy>=1.26.0",
+  "PyYAML>=6.0",
+  "python-dotenv>=1.0.0",
+  "openai>=1.40.0",
+  "qdrant-client>=1.9.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+rag-app = "rag_app.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

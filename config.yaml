@@ -1,0 +1,97 @@
+docs_dir: data/docs
+tickets_dir: data/tickets
+store_dir: data/store
+
+# Each preset is a full retrieval configuration, not just a size. Presets A and
+# B vary chunk_size on the naive 'flat' strategy so the size effect is visible
+# in isolation; C and D change the strategy itself.
+#
+#   flat     one document, character windows — bleeds across ticket boundaries
+#   ticket   one chunk per ticket            — citation is always exact
+#   section  turns packed under a repeated header — self-describing fragments
+chunk_presets:
+  A:
+    strategy: flat
+    chunk_size: 500
+    overlap: 50
+  B:
+    strategy: flat
+    chunk_size: 1000
+    overlap: 100
+  C:
+    strategy: ticket
+    chunk_size: 2000
+    overlap: 200
+  D:
+    strategy: section
+    chunk_size: 700
+    overlap: 0
+
+default_preset: C
+
+# Swap to BAAI/bge-small-en-v1.5 or intfloat/e5-small-v2 to compare families.
+# Prefixes are applied automatically per family — see embed.MODEL_REGISTRY.
+bi_encoder_model: sentence-transformers/all-MiniLM-L6-v2
+cross_encoder_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+
+retrieve_k: 10
+rerank_n: 3
+
+# The cross-encoder emits unbounded logits (roughly -11..+11). Squashing them
+# through a sigmoid puts the gate on a calibrated 0-1 scale, so 0.5 means
+# "the model considers this more relevant than not" instead of being an
+# arbitrary point on a raw logit axis.
+#
+# 0.20 is chosen from evidence, not taste. `eval --all --sweep` puts the
+# optimum band at 0.05-0.45 (0 false refusals, 4/4 correct refusals); above
+# 0.50 false refusals appear. Within that band the deciding evidence is query
+# shape: well-formed questions score >0.95, the out-of-corpus questions score
+# <0.05, but terse search-box queries ("refund timing", "webhook retries")
+# land around 0.25. A threshold of 0.20 sits below those and still far above
+# the unanswerable band.
+#
+# Re-run the sweep after swapping in a real corpus — this number is tuned on
+# 36 synthetic tickets and will NOT transfer.
+rerank_score_scale: sigmoid
+score_threshold: 0.20
+
+# numpy = exact brute force, zero dependencies.
+# qdrant = real vector DB (embedded by default; set qdrant.url for a server).
+backend: numpy
+
+# dense  = bi-encoder cosine only (the week-1 baseline).
+# hybrid = dense + BM25 keyword search, fused by Reciprocal Rank Fusion.
+#          See hybrid.py. This is the ONE change `eval --all --compare-retrieval`
+#          measures — do not tune anything else while comparing modes, or the
+#          before/after number stops meaning anything.
+#
+# Measured on this corpus (`eval --all --compare-retrieval`, hit-rate@3):
+#   A (flat/500)    dense 95% -> hybrid 91%   (-5%, 1 regressed, 1 still broken)
+#   B (flat/1000)   dense 91% -> hybrid 86%   (-5%, 1 regressed, 2 still broken)
+#   C (ticket/2000) dense 100% -> hybrid 100% (+0%, already saturated)
+#   D (section/700) dense 100% -> hybrid 100% (+0%, already saturated)
+#
+# `dense` stays the default: hybrid helped nothing here and mildly hurt the
+# flat-chunked presets. Root cause on A/B is last week's chunking-bleed defect
+# — BM25 latches onto boilerplate/header vocabulary shared by boundary-bled
+# neighbour chunks and dilutes an already-correct dense pick via RRF. C/D never
+# had room to improve: retrieval was already at 95-100% hit-rate@3 before this
+# change. Hybrid mode is real and tested (tests/test_hybrid*.py) — worth
+# revisiting on a larger or keyword-heavier corpus, not this one.
+retrieval:
+  mode: dense
+  rrf_k: 60       # RRF's rank-discount constant; 60 is the standard TREC value
+  bm25_pool: 20   # BM25 candidates pulled into the fusion pool
+
+qdrant:
+  url: null
+  m: 16
+  ef_construct: 100
+  hnsw_ef: 128
+
+llm:
+  base_url: https://openrouter.ai/api/v1
+  # Change model anytime: https://openrouter.ai/models
+  model: openai/gpt-4o-mini
+  temperature: 0.0
+  timeout_seconds: 30
