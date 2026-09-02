@@ -16,10 +16,19 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "openai>=1.40.0",
   "qdrant-client>=1.9.0",
+  # Pure Python, no system libraries — matters on Windows, where pdfminer/
+  # poppler-backed alternatives need a toolchain this project otherwise avoids.
+  "pypdf>=4.0.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]
+# The browser UI is optional: the CLI is the primary surface and must keep
+# working without streamlit (and without pulling its dependency tree) installed.
+# 1.62 is the version this was verified against; `width="stretch"` on dataframes
+# and buttons replaced `use_container_width`, whose removal date has passed.
+ui = ["streamlit>=1.62.0"]
+pdf = ["pypdf>=4.0.0"]
 
 [project.scripts]
 rag-app = "rag_app.cli:main"

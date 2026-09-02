@@ -35,10 +35,24 @@ class EmbeddingModelSpec:
     query_prefix: str = ""
     passage_prefix: str = ""
     note: str = ""
+    # Input ceiling in word-piece tokens, MEASURED from each model's
+    # `max_seq_length` — not read off a model card. Text past it is silently
+    # dropped before embedding, so this is the real bound on chunk_size, and
+    # it matters far more than `dim` does. 0 = unknown (an inferred model).
+    max_tokens: int = 0
 
     @property
     def asymmetric(self) -> bool:
         return bool(self.query_prefix or self.passage_prefix)
+
+    @property
+    def max_chars(self) -> int:
+        """Rough character equivalent of `max_tokens`, at ~4 chars/token.
+
+        Deliberately approximate: tokenization is content-dependent, so this is
+        a ceiling to stay under, not a number to tune against.
+        """
+        return self.max_tokens * 4
 
 
 # Small, CPU-friendly models. All three sit within a few MTEB retrieval points
@@ -47,17 +61,22 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
     "sentence-transformers/all-MiniLM-L6-v2": EmbeddingModelSpec(
         name="sentence-transformers/all-MiniLM-L6-v2",
         dim=384,
-        note="22M params. Symmetric, no prefix. Fast baseline, weakest on MTEB retrieval.",
+        max_tokens=256,
+        note="22M params. Symmetric, no prefix. Fast baseline, weakest on MTEB "
+             "retrieval, and the shortest input window here (256 tokens).",
     ),
     "BAAI/bge-small-en-v1.5": EmbeddingModelSpec(
         name="BAAI/bge-small-en-v1.5",
         dim=384,
+        max_tokens=512,
         query_prefix="Represent this sentence for searching relevant passages: ",
-        note="33M params. Instruction on the query only; passages stay bare.",
+        note="33M params. Instruction on the QUERY only; passages stay bare. "
+             "Same 384 dims as MiniLM with twice the input window.",
     ),
     "intfloat/e5-small-v2": EmbeddingModelSpec(
         name="intfloat/e5-small-v2",
         dim=384,
+        max_tokens=512,
         query_prefix="query: ",
         passage_prefix="passage: ",
         note="33M params. BOTH sides need a prefix — omitting them measurably hurts.",

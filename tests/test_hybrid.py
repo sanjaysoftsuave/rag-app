@@ -3,7 +3,9 @@ import numpy as np
 from rag_app.bm25 import BM25Index
 from rag_app.chunking import Chunk
 from rag_app.hybrid import hybrid_retrieve, reciprocal_rank_fusion
-from rag_app.store import ScoredChunk, VectorStore
+from rag_app.store import ScoredChunk
+
+from conftest import make_qdrant_store
 
 
 def _sc(chunk_id: str, source: str, score: float) -> ScoredChunk:
@@ -54,7 +56,7 @@ def _unit(row):
     return v / np.linalg.norm(v)
 
 
-def test_hybrid_retrieve_surfaces_a_keyword_only_match():
+def test_hybrid_retrieve_surfaces_a_keyword_only_match(tmp_path):
     """A ticket that shares almost no embedding-space similarity with the
     query but contains its exact id should still surface via BM25."""
     chunks = [
@@ -63,7 +65,7 @@ def test_hybrid_retrieve_surfaces_a_keyword_only_match():
     ]
     # Vectors deliberately favor TIC-1001 in embedding space.
     vectors = np.vstack([_unit([1, 0]), _unit([0, 1])])
-    store = VectorStore(chunks, vectors)
+    store = make_qdrant_store(tmp_path, chunks, vectors)
     bm25 = BM25Index(chunks)
 
     query_vec = _unit([1, 0])  # dense search alone would prefer TIC-1001
@@ -72,7 +74,7 @@ def test_hybrid_retrieve_surfaces_a_keyword_only_match():
     assert "TIC-9999" in sources, "the exact-id match must surface via the keyword side of the fusion"
 
 
-def test_hybrid_retrieve_respects_filter():
+def test_hybrid_retrieve_respects_filter(tmp_path):
     from rag_app.filters import MetaFilter
 
     chunks = [
@@ -80,7 +82,7 @@ def test_hybrid_retrieve_respects_filter():
         Chunk("b::0", "TIC-1002", "rate limit pro plan", {"customer_tier": "pro"}),
     ]
     vectors = np.vstack([_unit([1, 0]), _unit([1, 0.01])])
-    store = VectorStore(chunks, vectors)
+    store = make_qdrant_store(tmp_path, chunks, vectors)
     bm25 = BM25Index(chunks)
 
     results = hybrid_retrieve(
@@ -90,10 +92,10 @@ def test_hybrid_retrieve_respects_filter():
     assert all(r.chunk.metadata["customer_tier"] == "pro" for r in results)
 
 
-def test_hybrid_retrieve_truncates_to_k():
+def test_hybrid_retrieve_truncates_to_k(tmp_path):
     chunks = [Chunk(f"{i}::0", f"TIC-{i}", f"rate limit ticket number {i}") for i in range(10)]
     vectors = np.vstack([_unit([1, i * 0.01]) for i in range(10)])
-    store = VectorStore(chunks, vectors)
+    store = make_qdrant_store(tmp_path, chunks, vectors)
     bm25 = BM25Index(chunks)
     results = hybrid_retrieve(store, bm25, _unit([1, 0]), "rate limit ticket", k=3)
     assert len(results) == 3

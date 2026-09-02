@@ -1,55 +1,96 @@
-# Ask My Support Tickets
+# Ask My Documents
 
-A plain-Python RAG app over a customer-support help-centre drop. Ask a question,
-get an answer built only from the tickets, with the ticket id it came from — and
-an explicit "I don't know" when the answer isn't there.
+A plain-Python RAG app over your own documents. Ask a question, get an answer
+built only from what you uploaded, with the source it came from — and an
+explicit "I don't know" when the answer isn't there.
 
-No LangChain, no LlamaIndex, no web UI. Every retrieval step is a function you
-can read and print.
+No LangChain, no LlamaIndex. Every retrieval step is a function you can read and
+print, and a browser UI that shows you each one for a given question rather than
+only the answer.
 
 ```
-tickets.jsonl → chunk → embed → vector store → top-K → cross-encoder rerank → score gate → LLM
-                  ↑                    ↑                        ↑                  ↑
-             3 strategies      numpy or Qdrant         reranks near-dups     refuses instead
-                                + metadata filter                            of guessing
+data/tickets/*.md, *.txt, *.pdf   (each file windowed on its own)
+    -> chunk -> embed -> Qdrant -> top-K -> cross-encoder rerank -> score gate -> LLM
+                                      |            |                      |
+                             embedded or server   reranks near-dups    refuses instead
+                              + metadata filter                         of guessing
 ```
+
+## What documents are accepted
+
+Drop files into `data/tickets/` — or upload them in the browser, which puts them
+there for you.
+
+| Format | Loader | Citation label |
+|---|---|---|
+| `*.md`, `*.markdown`, `*.txt` | [docs.py](src/rag_app/docs.py) | The filename, e.g. `[refund-policy.md]` |
+| `*.pdf` | [pdfs.py](src/rag_app/pdfs.py) | The filename, e.g. `[handbook.pdf]` |
+
+All three go through the same path. A PDF's pages are joined into one block of
+text before windowing, so it is chunked exactly like a `.md` file — which means
+a fact spanning a page break stays whole.
+
+Every source is windowed **on its own**, never concatenated with another file.
+That single rule is what makes a citation trustworthy: because there is never a
+second document in a window, a chunk can never be attributed to a source that
+supplied only part of its text.
+
+**A scanned PDF contributes nothing.** Page images carry no text layer, so
+extraction returns empty and the file yields zero chunks. Ingest and the UI say
+so explicitly rather than reporting a successful ingest of nothing. There is no
+OCR in this app.
+
+## The browser UI
+
+```bash
+pip install -e ".[ui]"
+python -m rag_app ui            # or: streamlit run app.py
+```
+
+Three tabs: **Ask**, **Corpus & chunking**, **Add documents** (drag in PDFs and
+re-ingest without touching a terminal).
+
+The Ask tab is the point. For every question it shows the config in effect, the
+exact string handed to the bi-encoder *including the prefix an asymmetric model
+requires*, the top-K with scores, the full rerank table — **including the
+candidates that were scored and cut**, with how far each moved and the raw logit
+behind each sigmoid score — which of the four gate paths fired and why, the
+literal prompt sent to the model, the grounded-vs-invented citation split, and a
+per-stage timing breakdown.
+
+It runs the same `ask()` the CLI does; nothing is re-derived for display. Timing
+comes from wrapping the injected embedder/store/reranker in stopwatches, so the
+pipeline itself carries no instrumentation.
 
 ## Quick start
 
 ```bash
-python -m venv .venv
+py -m venv .venv
 .venv\Scripts\activate
-pip install -e ".[dev]"
+python -m pip install -e ".[dev,ui]"
 copy .env.example .env          # then set OPENROUTER_API_KEY
 
-python -m rag_app chunks --all              # see chunking differences, no models needed
-python -m rag_app ingest --all              # build all four stores
-python -m rag_app ask "What is the rate limit on the Free plan?"
-python -m rag_app eval --all                # score retrieval + the refusal gate
+python -m rag_app ui            # add documents, build the index, ask
 ```
+
+Then in the browser: **Add documents** → drop your files → **Run ingest** →
+**Ask**. First launch downloads ~150 MB of models and takes a minute; after that
+everything but generation is local.
 
 ## Commands
 
+The UI is the primary surface. What survives on the command line is what is
+genuinely easier without a browser:
+
 | Command | What it does |
 |---|---|
-| `chunks --all [--show N]` | Chunk statistics per preset, including boundary bleed. No embedding, so it's instant. |
-| `ingest [--preset X \| --all]` | Load → chunk → embed → persist. Reports bleed for `flat` presets. |
-| `ask "..." [--preset X] [--filter k=v] [--quiet]` | Answer a question. Repeat `--filter` to narrow by metadata. |
-| `compare "..." [--generate]` | Same question across every preset, side by side, with a summary table. Retrieval-only unless `--generate`. |
-| `eval [--all]` | hit@K, MRR, rerank lift, refusal accuracy against the gold set. |
+| `ui [--port N] [--headless]` | Launch the app. Or `streamlit run app.py`. |
+| `ask "..." [--filter k=v] [--quiet]` | Answer one question and print the full retrieval trace. |
+| `chunks [--all] [--show N]` | Preview how the corpus splits. Loads no models, so it is instant. |
 | `models` | The embedding-model registry and each family's prefix rules. |
 
-## The four presets
-
-`A` and `B` differ **only** in chunk size, so the size effect is isolated.
-`C` and `D` change the strategy itself.
-
-| Preset | Strategy | Size | Overlap | What it demonstrates |
-|---|---|---|---|---|
-| A | `flat` | 500 | 50 | Naive character windows over the whole corpus |
-| B | `flat` | 1000 | 100 | Same, larger windows |
-| C | `ticket` | 2000 | 200 | One chunk per ticket — the right default here |
-| D | `section` | 700 | 0 | Turns packed under a repeated ticket header |
+**There is no `ingest` command.** Building the index is a UI action, deliberately
+in one place so the two surfaces cannot drift apart.
 
 ---
 
@@ -57,7 +98,7 @@ python -m rag_app eval --all                # score retrieval + the refusal gate
 
 ## 1. Why RAG
 
-A language model answers from its training data. Ask it about *your* help centre
+A language model answers from its training data. Ask it about *your* documents
 and it will produce something fluent and invented, because "I don't know" is a
 rare token in its training distribution. RAG replaces recall with reading: find
 the right text first, then let the model write only from that text.
@@ -66,46 +107,7 @@ Two things make it *grounded* rather than just "context-stuffed": a citation the
 user can check ([generate.py](src/rag_app/generate.py)), and a refusal path that
 runs before the model does ([pipeline.py](src/rag_app/pipeline.py)).
 
-## 2. Chunking strategies
-
-Read [chunking.py](src/rag_app/chunking.py). Three strategies, and the choice
-matters more than any parameter in this repo.
-
-Support tickets have hard semantic boundaries. A fixed character window does not
-know that, so it produces chunks that begin inside one ticket and end inside the
-next. The chunk is then cited as whichever ticket it *starts* in — a citation
-that is wrong for half its own content.
-
-Measured on the shipped 36-ticket corpus:
-
-```
-preset  strategy  size    overlap   chunks   avg chars   boundary bleed
-A       flat      500     50        60       492         42/60 (70%)
-B       flat      1000    100       30       984         29/30 (97%)
-C       ticket    2000    200       36       732         0/36 (0%)
-D       section   700     0         62       476         0/62 (0%)
-```
-
-Run `python -m rag_app chunks --all --show 3` to see the bleeding chunks
-verbatim.
-
-## 3. Chunk size & overlap
-
-The counterintuitive result above is the thing worth understanding: **going from
-500 to 1000 characters made bleeding worse, not better** — 70% → 97%.
-
-Larger windows span more ticket boundaries, not fewer. The instinct "bigger
-chunks preserve more context" is right for prose with no hard boundaries and
-exactly wrong for a corpus of discrete records. Structure beats size: preset C
-uses the *largest* chunks of all and bleeds 0%, because its boundaries are the
-document's own.
-
-Overlap exists to stop a fact being split across two chunks so neither contains
-it whole. It costs storage and duplicates content into your top-K (two
-overlapping chunks can both surface, wasting a slot). With per-ticket chunking
-overlap is nearly redundant — the boundary is already in the right place.
-
-## 4. Embeddings & dense retrieval
+## 2. Embeddings & dense retrieval
 
 An embedding maps text to a vector positioned by *meaning*, so "how do I stop
 getting 429" lands near "rate limit exceeded" despite sharing no keywords. That
@@ -119,18 +121,23 @@ multiply ([store.py](src/rag_app/store.py)).
 > Any code writing vectors into a store directly — tests included — must
 > L2-normalize first, or the ranking is silently wrong.
 
-## 5. Embedding models (MTEB, BGE, E5)
+## 3. Embedding models (MTEB, BGE, E5)
 
 `python -m rag_app models`
 
 The trap is **asymmetry**. A question and the passage answering it are different
 kinds of text, and the leading open models bake that into a required prefix:
 
-| Model | Params | Query prefix | Passage prefix |
-|---|---|---|---|
-| `all-MiniLM-L6-v2` | 22M | — | — |
-| `bge-small-en-v1.5` | 33M | `Represent this sentence for searching relevant passages: ` | — |
-| `e5-small-v2` | 33M | `query: ` | `passage: ` |
+| Model | Params | Dim | Max tokens | Query prefix | Passage prefix |
+|---|---|---|---|---|---|
+| `all-MiniLM-L6-v2` | 22M | 384 | 256 | — | — |
+| `bge-small-en-v1.5` ← active | 33M | 384 | 512 | `Represent this sentence for searching relevant passages: ` | — |
+| `e5-small-v2` | 33M | 384 | 512 | `query: ` | `passage: ` |
+
+All three are 384-dimensional because they are the same size class — `dim` is an
+output of the architecture, not a setting you pick. **`max_tokens` is the number
+that actually constrains the app**: text past it is dropped before embedding, so
+it bounds `chunk_size`. A test fails the build if a preset crosses it.
 
 Omit the prefix on E5 or BGE and nothing errors. You get slightly worse vectors,
 slightly worse retrieval, and no signal that anything is wrong. That is why
@@ -140,10 +147,10 @@ one `encode`.
 **MTEB** (the Massive Text Embedding Benchmark) is how you choose between them —
 but read the **Retrieval** column, not the headline average. A model can top the
 average on classification and clustering while being mediocre at the one job
-here. Switch models in `config.yaml` and re-ingest; `meta.json` refuses to load
-a store built with a different model rather than returning garbage.
+here. Switch models in `config.yaml` and re-ingest; the `provenance.json` sidecar
+refuses to load a store built with a different model rather than returning garbage.
 
-## 6. Bi-encoder vs cross-encoder
+## 4. Bi-encoder vs cross-encoder
 
 See the module docstring in [rerank.py](src/rag_app/rerank.py).
 
@@ -158,17 +165,18 @@ See the module docstring in [rerank.py](src/rag_app/rerank.py).
 Hence retrieve-then-rerank: the bi-encoder narrows millions to K cheaply, the
 cross-encoder sorts those K correctly.
 
-The corpus contains three near-identical rate-limit tickets (Free 60/min, Pro
-600/min, Enterprise 6000/min). They sit almost on top of each other in embedding
-space. Only a model reading "Free plan" *against* the question separates them —
-which is exactly what `eval` measures as **rerank lift**.
+This matters most on near-duplicate passages — three pages describing three
+plan tiers, say. They sit almost on top of each other in embedding space, and
+only a model reading the query *against* each passage separates them. The UI's
+**④ Reranking** panel shows exactly this: which candidates the cross-encoder
+promoted, which it demoted out of context, and by how many places.
 
-## 7. Vector databases (HNSW)
+## 5. Vector databases (HNSW)
 
 Read the header of [qdrant_store.py](src/rag_app/qdrant_store.py) before quoting
 any HNSW numbers, because there's a real caveat in this setup.
 
-Brute force is O(N) per query. Fine for 36 tickets, fatal at 36 million. **HNSW**
+Brute force is O(N) per query. Fine for a few hundred chunks, fatal at 36 million. **HNSW**
 (Hierarchical Navigable Small World) builds a layered proximity graph and walks
 it greedily: roughly O(log N) with ~95–99% recall. The knobs:
 
@@ -191,51 +199,60 @@ and these parameters set how often.
 > then set `qdrant.url: http://localhost:6333` in `config.yaml`. The application
 > code is identical either way.
 
-## 8. Similarity search & top-K
+## 6. Similarity search & top-K
 
 `retrieve_k: 10` then `rerank_n: 3`.
 
 K is a recall/precision budget. Too small and the right chunk never enters the
-funnel — no reranker can recover it, which is why `eval` reports **hit@K**
-separately from top-1. Too large and you feed the cross-encoder junk and pay for
+funnel — no reranker can recover it, which is why the UI shows the retrieval
+list separately from the rerank list. Too large and you feed the cross-encoder junk and pay for
 it linearly.
 
 `config.py` rejects `rerank_n > retrieve_k` at load time, because the extra
 slots are unreachable and the misconfiguration is otherwise invisible.
 
-Cosine similarity is the metric; vectors are pre-normalized so it's a dot
-product.
+Cosine similarity is the metric (`Distance.COSINE` on Qdrant's collection);
+vectors are pre-normalized so it's equivalent to a plain dot product.
 
-## 9. Qdrant / Chroma / pgvector
+## 7. Qdrant / Chroma / pgvector
 
-This repo implements **numpy** and **Qdrant** behind one `SearchBackend`
-protocol ([store.py](src/rag_app/store.py)), switchable with `backend:` in
-`config.yaml`. Same filters, same pipeline, same tests.
+Qdrant is the only vector store this app has — no in-process numpy fallback.
+That wasn't the original design: a hand-rolled numpy store (exact brute force,
+zero dependencies, fully inspectable — you could open `vectors.npy` and see
+exactly what was stored) shipped first, specifically so the vector-DB concepts
+had something honest to be measured against. It was deliberately removed once
+Qdrant alone was judged sufficient for every environment this app runs in —
+the numpy code, the `backend: numpy|qdrant` config toggle, and the two-backend
+test suite are gone, not just unused. `SearchBackend`
+([store.py](src/rag_app/store.py)) stays as a Protocol — every caller depends
+on a small explicit shape, not a `QdrantStore` import — so a second backend
+still has a contract to implement if one is ever needed again.
 
 | | Strength | Cost |
 |---|---|---|
-| **numpy** (here) | Exact, zero deps, fully inspectable | O(N) — dies at scale |
-| **Qdrant** | Best-in-class filtered ANN, Rust, embedded or server | Another service to run |
+| **Qdrant** (here) | Best-in-class filtered ANN, Rust core, embedded *or* server behind the identical API | Another service to run for real HNSW |
 | **Chroma** | Easiest start, embedded, hnswlib under the hood | Weaker filtering, less operable |
 | **pgvector** | It's just Postgres — joins, transactions, one backup story | ANN weaker than dedicated engines at scale |
 
-The honest default for a project this size is the numpy store. The reason to
-reach for a real vector DB is filtering at scale, not raw speed.
+Embedded mode (the default here — see §7) means "no server to run" and "no
+approximate index" simultaneously; that tradeoff doesn't change by removing
+numpy. The reason to point `qdrant.url` at a real server is filtering *at
+scale* with real HNSW, not raw speed on a small corpus.
 
-## 10. Metadata filtering
+## 8. Metadata filtering
 
-Every chunk carries its ticket's metadata — `product`, `category`, `status`,
-`priority`, `customer_tier`, `created_at`, `tags`
-([tickets.py](src/rag_app/tickets.py)).
+Every chunk carries what its source knows about itself: `source_type`
+(`doc` or `pdf`), and for a PDF page the `pdf_file` it came from and its `page`
+number.
 
 ```bash
-python -m rag_app ask "what is my rate limit?" --filter customer_tier=free
-python -m rag_app ask "refund timing" --filter product=Billing --filter status=resolved
+python -m rag_app ask "refund timing" --filter source_type=pdf
+python -m rag_app ask "refund timing" --filter pdf_file=handbook.pdf
 ```
 
-This is the clean fix for the near-duplicate problem: "what's my rate limit"
-is genuinely ambiguous across plans, and no reranker can resolve it, because the
-missing information isn't in the question. Filtering supplies it.
+Filtering is the clean fix for a question that is genuinely ambiguous — one
+whose missing information isn't in the question at all, so no reranker can
+recover it. Filtering supplies it from outside.
 
 **Pre-filter vs post-filter** is the subtle part. Exact search can pre-filter for
 free: shrink the candidate set, then rank ([store.py](src/rag_app/store.py)).
@@ -246,7 +263,7 @@ that consults payload indexes during traversal, which is why
 `create_payload_index` in [qdrant_store.py](src/rag_app/qdrant_store.py) is not
 optional bookkeeping.
 
-## 11. Grounded generation & citations
+## 9. Grounded generation & citations
 
 Grounding is enforced in **four** places. All four must survive any refactor.
 
@@ -260,7 +277,7 @@ Grounding is enforced in **four** places. All four must survive any refactor.
    they didn't say. Matching is punctuation-normalized, because models rewrite
    the em dash in `DONT_KNOW` constantly and an `==` check would miss it.
 4. **Citation verification** — `cited_sources()` splits the model's citations
-   into grounded and invented. A citation naming a ticket that was never in the
+   into grounded and invented. A citation naming a source that was never in the
    context window is the clearest possible grounding failure, and it's invisible
    unless you check. It's reported as `!! HALLUCINATED CITATIONS`.
 
@@ -279,44 +296,43 @@ threshold outside 0–1.
 
 ---
 
-## Evaluation
-
-`python -m rag_app eval --all` scores 16 answerable questions (each with a known
-correct ticket) and 4 that are deliberately absent from the corpus.
-
-- **hit@K** — did the right ticket enter the funnel at all? A ceiling on
-  everything downstream.
-- **top-1 bi-encoder vs top-1 reranked** — the difference is the rerank lift,
-  the number that justifies the cross-encoder's cost.
-- **MRR** — how high the right ticket ranked, on average.
-- **refusal accuracy** — of the questions with no answer in the corpus, how many
-  were refused.
-- **false refusals** — answerable questions wrongly gated out. Read this
-  *together* with refusal accuracy: a gate that refuses everything scores 100%
-  on refusals and is useless.
-
-Add cases in `GOLD` in [evaluate.py](src/rag_app/evaluate.py). A test asserts
-every gold question points at a ticket that actually exists, so the set can't
-rot silently.
-
 ## Testing
 
 ```bash
-pytest -q                        # 67 tests, ~1s
-pytest tests/test_grounding.py -q
+python -m pytest -q              # 161 tests, ~2s
+python -m pytest tests/test_grounding.py -q
 ```
 
-The suite never downloads a model or calls an API — every test injects a fake.
-That's a hard constraint, not a convenience: it's the only reason it's fast
-enough to run on every change. `ask()` takes `embedder`, `reranker`,
-`generate_fn` and `store` overrides, and `run_ingest()` takes an `embedder`, for
-exactly this reason.
+The suite never downloads a model, calls the LLM API, or reads a real PDF —
+every test injects a fake (`FakeEmbedder`, `FakeReranker`, a stub `generate_fn`,
+a stub PDF reader). `ask()` takes `embedder`, `reranker`, `generate_fn` and
+`store` overrides, `run_ingest()` takes an `embedder`, and `read_pdf()` takes a
+`reader_factory`, all for exactly this reason — so no binary fixtures are
+checked in either.
+
+Vector storage is the one thing tests do NOT fake: Qdrant is the only backend
+the app has, so tests build real embedded `QdrantStore` instances
+(`tests/conftest.py`) rather than a stand-in. It costs real time, and it means
+these tests exercise the actual storage/retrieval code path rather than an
+approximation of it.
 
 ## Known limitations
 
-- Chunking is character-based, not token-based, despite `chunk_size` reading
-  like tokens.
-- Embedded Qdrant is brute force, not HNSW (see topic 7).
-- The corpus is 36 synthetic tickets. Thresholds tuned on it won't transfer to a
-  real drop — re-run `eval` after swapping in real data.
+- Chunking is character-based, not token-based, despite `chunk_size` reading like
+  tokens — and `all-MiniLM-L6-v2` truncates at 256 word-pieces (~1000 characters),
+  so a larger `chunk_size` silently discards the tail of every chunk before it is
+  ever embedded.
+- Chunk boundaries fall at exact character counts, mid-word and mid-sentence.
+  Separator-aware splitting (paragraph, then line, then sentence) would be a
+  straightforward improvement.
+- A PDF is cited by filename only. On a long PDF that means searching the file to
+  check a claim; page-level citation was tried and traded away because it split
+  facts across page breaks.
+- Embedded Qdrant is brute force, not HNSW (see topic 5).
+- `score_threshold` ships at a value measured on a different corpus and will not
+  transfer to yours. Tune it in the UI: drag the slider and watch which questions
+  flip between answered and refused.
+- There is no automated evaluation harness. An earlier version scored hit@K, MRR,
+  rerank lift and refusal accuracy against a gold set, but that was built around a
+  structured ticket corpus and was removed with it (`git log` has it).
 - `data/store/` is gitignored, so a fresh clone must `ingest` before `ask`.

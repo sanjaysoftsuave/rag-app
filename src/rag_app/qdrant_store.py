@@ -1,4 +1,4 @@
-"""Qdrant backend — same interface as the numpy store, real vector-DB semantics.
+"""Qdrant — the only vector store. No in-process numpy fallback.
 
 READ THIS BEFORE QUOTING HNSW NUMBERS
 -------------------------------------
@@ -41,6 +41,8 @@ search degrades badly at scale.
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 
@@ -50,18 +52,15 @@ from rag_app.chunking import Chunk
 from rag_app.filters import MetaFilter
 from rag_app.store import ScoredChunk, StoreMeta
 
-COLLECTION = "tickets"
+COLLECTION = "documents"
 
 # Fields we filter on. Qdrant needs an explicit payload index per field.
+# What a document corpus actually carries: a chunk's kind, and the file it came
+# from. (Ignored in embedded mode, which warns as much; they matter once
+# `qdrant.url` points at a real server.)
 INDEXED_FIELDS = (
-    "ticket_id",
-    "product",
-    "category",
-    "status",
-    "priority",
-    "channel",
-    "customer_tier",
-    "strategy",
+    "source_type",
+    "source",
 )
 
 
@@ -84,10 +83,21 @@ def _to_qdrant_filter(flt: MetaFilter | None):
 
 
 class QdrantStore:
-    """Vector store backed by Qdrant, embedded or server."""
+    """Vector store backed by Qdrant, embedded or server.
+
+    `meta_dir` is always a local directory, regardless of whether the vectors
+    themselves live embedded on disk or on a remote server — the machine
+    running this code always has *somewhere* local to keep provenance, so
+    `provenance.json` lives there rather than needing a second storage mechanism
+    inside Qdrant itself (a reserved point with a dummy vector, a special
+    payload key excluded from every real search) for what is fundamentally
+    a small local sidecar file, the same role it played for the store this
+    replaced.
+    """
 
     def __init__(
         self,
+        meta_dir: Path,
         path: Path | None = None,
         url: str | None = None,
         collection: str = COLLECTION,
@@ -96,6 +106,9 @@ class QdrantStore:
         hnsw_ef: int = 128,
     ):
         from qdrant_client import QdrantClient
+
+        self.meta_dir = meta_dir
+        self.meta_dir.mkdir(parents=True, exist_ok=True)
 
         if url:
             self.client = QdrantClient(url=url)
@@ -154,6 +167,13 @@ class QdrantStore:
                 collection_name=self.collection, points=points[start : start + 256]
             )
         self._meta = meta
+        (self.meta_dir / "provenance.json").write_text(
+            json.dumps(asdict(meta), indent=2), encoding="utf-8"
+        )
+
+    def load_meta(self) -> StoreMeta | None:
+        """Read back the provenance `build()` wrote, or None if never built."""
+        return read_provenance(self.meta_dir)
 
     # -- query ---------------------------------------------------------------
 
@@ -225,6 +245,37 @@ class QdrantStore:
         # Embedded mode holds a file lock on the storage directory; without
         # closing, a second QdrantStore on the same path raises.
         self.client.close()
+
+
+def read_provenance(meta_dir: Path) -> StoreMeta | None:
+    """Read a store's provenance sidecar WITHOUT opening the database.
+
+    Embedded Qdrant takes a real file lock on open, so anything that only wants
+    to know "what settings built this index?" — the UI showing whether the
+    current chunking matches what is actually indexed — must not have to
+    instantiate a client to find out.
+
+    Deliberately NOT named `meta.json`: in embedded mode `meta_dir` is the
+    same directory Qdrant's own local storage uses, and Qdrant already writes
+    its OWN `meta.json` there (its collection registry — a
+    `{"collections": {...}}` file). A same-named sidecar silently clobbers it,
+    and the next `QdrantClient(path=...)` open fails with a
+    `KeyError: 'collections'` reading its own corrupted registry. Found by
+    actually reopening a store after close(), not by inspection.
+
+    Returns None when the store was never built.
+    """
+    meta_path = meta_dir / "provenance.json"
+    if not meta_path.exists():
+        return None
+    payload: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
+    payload.pop("format", None)
+    # Drop anything this version of StoreMeta no longer carries (a `strategy`
+    # written by an older format, say) rather than dying on an unexpected key.
+    # A sidecar is provenance, not a contract: failing to read it turns a
+    # cosmetic mismatch into "your whole index is unopenable".
+    known = {f.name for f in fields(StoreMeta)}
+    return StoreMeta(**{k: v for k, v in payload.items() if k in known})
 
 
 def qdrant_path_for_preset(store_dir: Path, preset: str) -> Path:

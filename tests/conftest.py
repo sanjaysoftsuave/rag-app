@@ -1,8 +1,11 @@
 """Shared fakes.
 
-Every test here runs offline. Nothing in this suite downloads a model or calls
-an API — that is a hard constraint, not a convenience, because it is the only
-reason the suite is fast enough to run on every change.
+Every test here runs offline in the sense that matters most: nothing
+downloads a model or calls a real LLM API. Vector storage is the one
+exception — Qdrant is the only backend the app has, so tests build real
+(embedded) Qdrant stores via `make_qdrant_store()` below rather than a
+numpy-shaped stand-in. Embedded Qdrant writes real files to `tmp_path` and
+holds a real file lock while open; nothing here talks to a network.
 """
 
 from __future__ import annotations
@@ -11,7 +14,8 @@ import numpy as np
 import pytest
 
 from rag_app.config import AppConfig, ChunkPreset, LlmConfig, QdrantConfig
-from rag_app.tickets import Ticket, Turn
+from rag_app.qdrant_store import QdrantStore
+from rag_app.store import StoreMeta
 
 
 class FakeEmbedder:
@@ -71,31 +75,14 @@ class FakeReranker:
         return out
 
 
-def make_ticket(ticket_id: str, subject: str = "Subject", **kwargs) -> Ticket:
-    defaults = dict(
-        product="API",
-        category="rate-limit",
-        status="resolved",
-        priority="high",
-        channel="email",
-        created_at="2026-01-01",
-        customer_tier="free",
-        conversation=[Turn("customer", "Question text"), Turn("agent", "Answer text")],
-        resolution="Resolved.",
-        tags=["tag"],
-    )
-    defaults.update(kwargs)
-    return Ticket(ticket_id=ticket_id, subject=subject, **defaults)  # type: ignore[arg-type]
-
-
 def make_config(tmp_path, **overrides) -> AppConfig:
     base = dict(
         docs_dir=tmp_path / "docs",
         tickets_dir=tmp_path / "tickets",
         store_dir=tmp_path / "store",
         chunk_presets={
-            "A": ChunkPreset(500, 50, "flat"),
-            "C": ChunkPreset(2000, 200, "ticket"),
+            "A": ChunkPreset(500, 50),
+            "C": ChunkPreset(2000, 200),
         },
         default_preset="C",
         bi_encoder_model="fake",
@@ -104,7 +91,6 @@ def make_config(tmp_path, **overrides) -> AppConfig:
         rerank_n=3,
         score_threshold=0.5,
         rerank_score_scale="raw",
-        backend="numpy",
         qdrant=QdrantConfig(),
         llm=LlmConfig(base_url="http://example", model="x", temperature=0.0),
         llm_api_key="test-key",
@@ -113,10 +99,19 @@ def make_config(tmp_path, **overrides) -> AppConfig:
     return AppConfig(**base)  # type: ignore[arg-type]
 
 
-@pytest.fixture
-def tickets():
-    return [
-        make_ticket("TIC-001", "Free plan rate limit", customer_tier="free"),
-        make_ticket("TIC-002", "Pro plan rate limit", customer_tier="pro"),
-        make_ticket("TIC-003", "Refund timing", product="Billing", category="refund"),
-    ]
+def make_qdrant_store(tmp_path, chunks, vectors, meta: StoreMeta | None = None, name: str = "qstore"):
+    """Build a real, embedded QdrantStore for a test.
+
+    `name` lets one test build more than one independent store under the same
+    `tmp_path` without them colliding on the same collection directory.
+    `meta` defaults to a placeholder — `QdrantStore.build()` requires one
+    (unlike the old numpy store, which tolerated `meta=None`), so most tests
+    that don't care about provenance just get a generic one for free.
+    """
+    vectors = np.asarray(vectors, dtype=np.float32)
+    dim = int(vectors.shape[1]) if vectors.ndim == 2 else 0
+    meta = meta or StoreMeta("fake", dim, 500, 50, len(chunks))
+    path = tmp_path / name
+    store = QdrantStore(meta_dir=path, path=path)
+    store.build(chunks, vectors, meta)
+    return store

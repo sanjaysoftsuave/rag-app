@@ -10,15 +10,21 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Name given to the single configuration from a `chunking:` block. It becomes
+# the store directory suffix (data/store/qdrant_default), so changing it
+# orphans an existing store rather than breaking anything.
+DEFAULT_PRESET = "default"
+
 
 @dataclass(frozen=True)
 class ChunkPreset:
+    """How text is windowed. There is only one method — see chunking.py."""
+
     chunk_size: int
     overlap: int
-    strategy: str = "flat"
 
     def describe(self) -> str:
-        return f"{self.strategy}/{self.chunk_size}/{self.overlap}"
+        return f"{self.chunk_size}/{self.overlap}"
 
 
 @dataclass(frozen=True)
@@ -41,14 +47,26 @@ class QdrantConfig:
 class RetrievalConfig:
     """Which candidate-generation strategy `ask()` uses.
 
-    'dense'  — bi-encoder cosine search only (the week-1 baseline).
+    'dense'  — bi-encoder cosine search only.
     'hybrid' — dense + BM25 keyword search, fused by Reciprocal Rank Fusion.
                See hybrid.py for why RRF rather than a weighted score blend.
+
+    `query_mode` transforms the question before retrieval (rewrite.py) and
+    `mmr` re-selects the reranked candidates for coverage (mmr.py). Both are
+    off by default: each is a real change to what the model reads, and neither
+    is worth enabling without a gold set to show it helped.
     """
 
     mode: str = "dense"
     rrf_k: int = 60
     bm25_pool: int = 20
+    # Query transform applied BEFORE retrieval: "off" | "rewrite" | "hyde".
+    # Both non-off modes cost an LLM call per question — see rewrite.py.
+    query_mode: str = "off"
+    # Maximal Marginal Relevance over the reranked candidates. lambda 1.0 is
+    # pure relevance (identical to off); lower trades relevance for coverage.
+    mmr: bool = False
+    mmr_lambda: float = 0.7
 
 
 @dataclass(frozen=True)
@@ -66,7 +84,6 @@ class AppConfig:
     llm: LlmConfig
     llm_api_key: str | None
     rerank_score_scale: str = "sigmoid"
-    backend: str = "numpy"
     qdrant: QdrantConfig = QdrantConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
 
@@ -81,23 +98,46 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     path = config_path or (ROOT / "config.yaml")
     raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    presets = {
-        name: ChunkPreset(
-            chunk_size=int(vals["chunk_size"]),
-            overlap=int(vals["overlap"]),
-            strategy=str(vals.get("strategy", "flat")),
-        )
-        for name, vals in raw["chunk_presets"].items()
-    }
-
-    default_preset = str(raw["default_preset"])
-    # Fail at load time with a useful message rather than later with a missing
-    # store directory that looks like an ingest problem.
-    if default_preset not in presets:
-        raise ValueError(
-            f"default_preset {default_preset!r} is not defined in chunk_presets "
-            f"{sorted(presets)}"
-        )
+    # Two accepted shapes, and the rest of the app cannot tell them apart:
+    #
+    #   chunking: {strategy, chunk_size, overlap}   -> one config named "default"
+    #   chunk_presets: {A: {...}, B: {...}}         -> several, plus default_preset
+    #
+    # Everything downstream iterates `sorted(cfg.chunk_presets)`, so the single
+    # form is just a one-entry map. That is what makes going back to several a
+    # YAML-only change — `compare`, `eval --all`, `chunks --all` and the UI's
+    # preset selector all start working again with no code touched.
+    raw_presets = raw.get("chunk_presets")
+    if raw_presets:
+        presets = {
+            name: ChunkPreset(
+                chunk_size=int(vals["chunk_size"]),
+                overlap=int(vals["overlap"]),
+            )
+            for name, vals in raw_presets.items()
+        }
+        default_preset = str(raw["default_preset"])
+        # Fail at load time with a useful message rather than later with a
+        # missing store directory that looks like an ingest problem.
+        if default_preset not in presets:
+            raise ValueError(
+                f"default_preset {default_preset!r} is not defined in chunk_presets "
+                f"{sorted(presets)}"
+            )
+    else:
+        chunking = raw.get("chunking")
+        if not chunking:
+            raise ValueError(
+                "config.yaml needs either a 'chunking' block (one configuration) or a "
+                "'chunk_presets' map plus 'default_preset' (several). Found neither."
+            )
+        presets = {
+            DEFAULT_PRESET: ChunkPreset(
+                chunk_size=int(chunking["chunk_size"]),
+                overlap=int(chunking["overlap"]),
+            )
+        }
+        default_preset = DEFAULT_PRESET
 
     retrieve_k = int(raw["retrieve_k"])
     rerank_n = int(raw["rerank_n"])
@@ -118,10 +158,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"'sigmoid' so scores are probabilities. Did you mean 'raw'?"
         )
 
-    backend = str(raw.get("backend", "numpy"))
-    if backend not in {"numpy", "qdrant"}:
-        raise ValueError(f"backend must be 'numpy' or 'qdrant', got {backend!r}")
-
     r_raw = raw.get("retrieval") or {}
     retrieval_mode = str(r_raw.get("mode", "dense"))
     if retrieval_mode not in {"dense", "hybrid"}:
@@ -129,13 +165,30 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"retrieval.mode must be 'dense' or 'hybrid', got {retrieval_mode!r}"
         )
 
+    query_mode = str(r_raw.get("query_mode", "off"))
+    if query_mode not in {"off", "rewrite", "hyde"}:
+        raise ValueError(
+            f"retrieval.query_mode must be 'off', 'rewrite' or 'hyde', got {query_mode!r}"
+        )
+
+    mmr_lambda = float(r_raw.get("mmr_lambda", 0.7))
+    if not 0.0 <= mmr_lambda <= 1.0:
+        raise ValueError(
+            f"retrieval.mmr_lambda is a mix between relevance (1.0) and diversity "
+            f"(0.0), so it must be between 0 and 1; got {mmr_lambda}"
+        )
+
     q_raw = raw.get("qdrant") or {}
     llm_raw = raw["llm"]
 
     return AppConfig(
-        docs_dir=_resolve(raw["docs_dir"]),
+        # Vestigial: nothing reads docs_dir since the corpus moved to
+        # tickets_dir, which holds .jsonl, .md/.txt AND .pdf together. It was
+        # a required key purely because the loader asked for it unconditionally
+        # — now optional, so config.yaml need not carry a dead setting.
+        docs_dir=_resolve(raw.get("docs_dir", "data/docs")),
         tickets_dir=_resolve(raw.get("tickets_dir", "data/tickets")),
-        store_dir=_resolve(raw["store_dir"]),
+        store_dir=_resolve(raw.get("store_dir", "data/store")),
         chunk_presets=presets,
         default_preset=default_preset,
         bi_encoder_model=str(raw["bi_encoder_model"]),
@@ -144,11 +197,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         rerank_n=rerank_n,
         score_threshold=threshold,
         rerank_score_scale=scale,
-        backend=backend,
         retrieval=RetrievalConfig(
             mode=retrieval_mode,
             rrf_k=int(r_raw.get("rrf_k", 60)),
             bm25_pool=int(r_raw.get("bm25_pool", 20)),
+            query_mode=query_mode,
+            mmr=bool(r_raw.get("mmr", False)),
+            mmr_lambda=mmr_lambda,
         ),
         qdrant=QdrantConfig(
             url=q_raw.get("url") or None,

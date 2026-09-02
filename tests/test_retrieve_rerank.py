@@ -3,10 +3,12 @@ import numpy as np
 from rag_app.chunking import Chunk
 from rag_app.rerank import rerank, stub_scorer
 from rag_app.retrieve import retrieve
-from rag_app.store import ScoredChunk, VectorStore
+from rag_app.store import ScoredChunk
+
+from conftest import make_qdrant_store
 
 
-def test_retrieve_orders_by_cosine():
+def test_retrieve_orders_by_cosine(tmp_path):
     chunks = [
         Chunk("1", "a.md", "one"),
         Chunk("2", "b.md", "two"),
@@ -18,7 +20,7 @@ def test_retrieve_orders_by_cosine():
     )
     # normalize last row for fair cosine
     vectors[2] = vectors[2] / np.linalg.norm(vectors[2])
-    store = VectorStore(chunks, vectors)
+    store = make_qdrant_store(tmp_path, chunks, vectors)
     hits = retrieve(store, np.array([1.0, 0.0], dtype=np.float32), k=2)
     assert hits[0].chunk.chunk_id == "1"
     assert len(hits) == 2

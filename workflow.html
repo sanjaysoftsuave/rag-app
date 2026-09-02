@@ -17,9 +17,9 @@
   --chalk:    #DCE9F2;   /* primary text */
   --chalk-2:  #8FB0C9;   /* secondary text */
   --chalk-3:  #5C819E;   /* tertiary / captions */
-  --cyan:     #5FD0E8;   /* flow, correct path */
-  --amber:    #F2B441;   /* defect: boundary bleed */
-  --verm:     #E8613C;   /* stop: gate refused */
+  --cyan:     #5FD0E8;   /* flow, correct path, chosen option */
+  --amber:    #F2B441;   /* defect / caution */
+  --verm:     #E8613C;   /* stop: gate refused, not chosen */
 
   --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -36,7 +36,6 @@ body{
   font-family:var(--sans);
   font-size:16px;
   line-height:1.6;
-  /* blueprint grid, very faint */
   background-image:
     linear-gradient(var(--line-dim) 1px, transparent 1px),
     linear-gradient(90deg, var(--line-dim) 1px, transparent 1px);
@@ -101,75 +100,82 @@ header{padding:clamp(56px,10vw,120px) 0 clamp(40px,6vw,64px)}
 .spec dd{margin:0;font-family:var(--mono);font-size:19px;color:var(--chalk);letter-spacing:-.02em}
 .spec dd small{font-size:11px;color:var(--chalk-3);letter-spacing:0}
 
-/* ── the two-track schematic ────────────────────────────────── */
-.tracks{display:grid;gap:22px}
-.track{
-  border:1px solid var(--line);background:var(--ink-2);
-  padding:20px 20px 22px;position:relative;
-}
-.track-tag{
-  position:absolute;top:-1px;left:-1px;
+/* ── overview flowchart: the literal picture, before any decisions ── */
+.pipeline-map{margin-top:8px}
+.map-label{
   font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
-  padding:5px 12px;background:var(--line);color:var(--ink);font-weight:700;
+  color:var(--chalk-3);margin:0 0 10px;
 }
-.track h3{margin:26px 0 4px}
-.track > p{font-size:13.5px;margin-bottom:18px}
-
-.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0}
-.node{
-  flex:1 1 130px;min-width:126px;
-  border:1px solid var(--line);background:var(--ink-3);
-  padding:12px 13px;position:relative;
+.map-row{display:flex;align-items:stretch;flex-wrap:wrap;gap:0 0}
+.map-box{
+  flex:1 1 118px;min-width:104px;border:1px solid var(--line);background:var(--ink-3);
+  padding:12px 10px 13px;text-align:center;
 }
-.node + .node{border-left:0}
-.node .n-i{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;color:var(--cyan);
-  display:block;margin-bottom:7px}
-.node .n-t{font-family:var(--mono);font-size:13px;color:var(--chalk);letter-spacing:-.01em;
-  display:block;margin-bottom:5px;font-weight:600}
-.node .n-d{font-size:11.5px;line-height:1.45;color:var(--chalk-3);display:block}
-.node.is-store{background:rgba(95,208,232,.10);border-color:var(--cyan)}
-.node.is-store .n-t{color:var(--cyan)}
-.node.is-gate{background:rgba(232,97,60,.10);border-color:var(--verm)}
-.node.is-gate .n-i,.node.is-gate .n-t{color:var(--verm)}
-
-/* animated flow direction — the one motion on the page */
-.railway{height:2px;background:var(--line-dim);margin:0;position:relative;overflow:hidden}
-.railway::after{
-  content:"";position:absolute;inset:0;
-  background:repeating-linear-gradient(90deg,var(--cyan) 0 10px,transparent 10px 26px);
-  opacity:.55;animation:slide 1.6s linear infinite;
+.map-box .mb-t{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--chalk);display:block;margin-bottom:4px}
+.map-box .mb-d{font-size:10px;color:var(--chalk-3);display:block;line-height:1.4}
+.map-box.is-io{background:rgba(95,208,232,.10);border-color:var(--cyan)}
+.map-box.is-io .mb-t{color:var(--cyan)}
+.map-box.is-gate{background:rgba(232,97,60,.10);border-color:var(--verm)}
+.map-box.is-gate .mb-t{color:var(--verm)}
+.map-arrow{
+  flex:0 0 24px;display:flex;align-items:center;justify-content:center;
+  color:var(--chalk-3);font-family:var(--mono);font-size:16px;
 }
-@keyframes slide{to{transform:translateX(26px)}}
-.converge{
-  font-family:var(--mono);font-size:11px;color:var(--chalk-3);
-  text-align:center;padding:12px 0;letter-spacing:.06em;
+.map-junction{
+  text-align:center;font-family:var(--mono);font-size:11px;color:var(--cyan);
+  padding:10px 0;letter-spacing:.06em;
 }
 
-/* ── stage table ────────────────────────────────────────────── */
-.stages{border:1px solid var(--line-dim);border-bottom:0}
-.stage{
-  display:grid;grid-template-columns:38px 1fr;gap:0;
-  border-bottom:1px solid var(--line-dim);
+/* ── decision cards: the core teaching unit, repeated per stage ──── */
+.decision{margin-bottom:52px}
+.decision:last-child{margin-bottom:0}
+.decision-head{display:flex;gap:16px;margin-bottom:22px;align-items:baseline}
+.decision-num{
+  font-family:var(--mono);font-size:12px;color:var(--chalk-3);flex:0 0 auto;
 }
-.stage-n{
-  font-family:var(--mono);font-size:11px;color:var(--chalk-3);
-  padding:18px 0 0;text-align:center;border-right:1px solid var(--line-dim);
-  background:var(--ink-2);
+.decision-title{margin:0 0 6px}
+.decision-file{font-family:var(--mono);font-size:11px;color:var(--chalk-3);font-weight:400;margin-left:10px}
+.decision-ask{
+  font-family:var(--mono);font-size:12.5px;color:var(--cyan);margin:0;letter-spacing:-.01em;
 }
-.stage-b{padding:16px 20px}
-.stage-b h3{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;margin-bottom:6px}
-.stage-b .file{
-  font-family:var(--mono);font-size:11px;color:var(--chalk-3);font-weight:400;letter-spacing:0;
+
+.options-label{
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--chalk-3);margin:18px 0 8px;
 }
-.stage-b p{font-size:13.5px;margin:0;max-width:76ch}
-.stage-b p + p{margin-top:8px}
+.options{
+  display:grid;gap:1px;background:var(--line-dim);border:1px solid var(--line-dim);
+  grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:8px;
+}
+.option{background:var(--ink-2);padding:14px 16px 16px;position:relative}
+.opt-badge{
+  position:absolute;top:-1px;right:-1px;
+  font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;
+  background:var(--cyan);color:var(--ink);padding:3px 9px;font-weight:700;
+}
+.option.is-chosen{background:rgba(95,208,232,.09)}
+.opt-name{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--chalk);display:block;margin-bottom:6px}
+.option.is-chosen .opt-name{color:var(--cyan)}
+.opt-desc{font-size:12px;color:var(--chalk-2);margin:0 0 8px;line-height:1.5}
+.opt-trade{font-size:11px;color:var(--chalk-3);margin:0 0 2px;line-height:1.5;font-family:var(--mono)}
+.opt-trade .plus{color:var(--cyan);font-weight:700}
+.opt-trade .minus{color:var(--verm);font-weight:700}
+
+.why{border-left:3px solid var(--cyan);padding:2px 0 2px 16px;margin-top:16px}
+.why h4{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--cyan);margin:0 0 6px;
+}
+.why p{font-size:13.5px;margin:0;color:var(--chalk-2)}
+.why p+p{margin-top:8px}
+
 .note{
-  border-left:2px solid var(--amber);padding-left:12px;margin-top:10px;
+  border-left:2px solid var(--amber);padding-left:12px;margin-top:14px;
   font-size:12.5px;color:var(--chalk-2);
 }
 .note b{color:var(--amber);font-weight:600}
 
-/* ── gate diagram ───────────────────────────────────────────── */
+/* ── gate / options-outcome diagram (reused for gate exits + buckets) ── */
 .gate-grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(228px,1fr))}
 .exit{border:1px solid var(--line);background:var(--ink-2);padding:16px 17px;position:relative}
 .exit .code{font-family:var(--mono);font-size:12px;letter-spacing:-.01em;margin-bottom:9px;display:block;font-weight:600}
@@ -192,9 +198,6 @@ header{padding:clamp(56px,10vw,120px) 0 clamp(40px,6vw,64px)}
   font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
   color:var(--chalk-3);margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
 }
-/* No overflow:hidden here — the window label is positioned above the tape's
-   top edge and clipping would erase it. The window itself is inset by
-   percentage, so it never spills horizontally. */
 .tape{position:relative;border:1px solid var(--line-dim);background:var(--ink-2);margin-top:34px}
 .tape-strip{display:flex;font-family:var(--mono);font-size:11px;line-height:1.75}
 .tk{padding:14px 12px;position:relative;flex:1;min-width:0}
@@ -204,8 +207,6 @@ header{padding:clamp(56px,10vw,120px) 0 clamp(40px,6vw,64px)}
   position:absolute;top:0;left:0;font-size:9px;letter-spacing:.12em;
   background:var(--line-dim);color:var(--chalk-2);padding:2px 7px;
 }
-/* Text must FILL each half, or the overlay window straddles empty space and
-   the whole point of the diagram is lost. */
 .tk p{margin:14px 0 0;font-size:10.5px;color:var(--chalk-3);font-family:var(--mono);
   line-height:1.75;hyphens:none}
 .seam{width:2px;background:var(--chalk-3);flex:0 0 2px;opacity:.6}
@@ -230,10 +231,8 @@ header{padding:clamp(56px,10vw,120px) 0 clamp(40px,6vw,64px)}
 .verdict .mark{font-weight:700;flex:0 0 auto}
 
 /* ── data tables ────────────────────────────────────────────── */
-/* Solid ground — without it the page's blueprint grid shows through the cells
-   and reads as false column rules. */
 .tbl-wrap{overflow-x:auto;border:1px solid var(--line-dim);margin-bottom:14px;background:var(--ink)}
-table{border-collapse:collapse;width:100%;min-width:520px;font-family:var(--mono);font-size:12.5px}
+table{border-collapse:collapse;width:100%;min-width:480px;font-family:var(--mono);font-size:12.5px}
 caption{
   text-align:left;padding:13px 16px;background:var(--ink-2);
   font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--chalk-3);
@@ -259,8 +258,6 @@ tr.is-best td{background:rgba(95,208,232,.07)}
   border:1px solid var(--line);background:#061321;
   font-family:var(--mono);font-size:12.5px;line-height:1.85;
   padding:18px 20px;overflow-x:auto;
-  /* Without this, literal newlines in the source collapse to spaces under
-     default HTML whitespace handling — every command runs onto one line. */
   white-space:pre-wrap;
 }
 .term .c{color:var(--chalk)}
@@ -296,6 +293,7 @@ tr.is-best td{background:rgba(95,208,232,.07)}
 }
 .rcol .rsub{font-size:10px;color:var(--chalk-3);margin:0 0 12px;font-family:var(--mono);line-height:1.5}
 .rcol.is-dense h4{color:var(--cyan)}
+.rcol.is-fused h4{color:var(--chalk)}
 .rrow{
   display:flex;align-items:center;gap:8px;
   font-family:var(--mono);font-size:11.5px;padding:6px 8px;margin-bottom:3px;
@@ -335,13 +333,13 @@ footer{
 }
 
 @media (max-width:720px){
-  .node{flex:1 1 100%;border-left:1px solid var(--line)}
-  .node + .node{border-left:1px solid var(--line);border-top:0}
   .stage{grid-template-columns:1fr}
-  .stage-n{text-align:left;padding:14px 20px 0;border-right:0;background:transparent}
   .tape-strip{font-size:10px}
   .case{grid-template-columns:1fr}
   .case-tag{width:fit-content}
+  .map-row{flex-direction:column}
+  .map-arrow{width:auto;height:22px;transform:rotate(90deg)}
+  .decision-head{flex-direction:column;gap:4px}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
@@ -354,11 +352,11 @@ footer{
 
 <!-- ══════════════ HEADER ══════════════ -->
 <header>
-  <p class="eyebrow">Pipeline drawing &nbsp;·&nbsp; rag-app</p>
+  <p class="eyebrow">Week 3 &nbsp;·&nbsp; Pipeline drawing &nbsp;·&nbsp; rag-app</p>
   <h1>Ask my support&nbsp;tickets.<br><span class="dim">Answer only from them,<br>or say I don't know.</span></h1>
-  <p class="lead">Two separate pipelines that meet at a vector store. One runs when you
-  add documents. The other runs when you ask a question. Nothing here is automatic —
-  each is a command you run.</p>
+  <p class="lead">Every stage below is a decision, not a fact of nature. Each one lists the
+  real alternatives, which one this project picked, and why — so you can judge whether the
+  same choice would hold for a different corpus, not just accept it.</p>
 
   <dl class="specsheet">
     <div class="spec"><dt>Corpus</dt><dd>36 <small>tickets</small></dd></div>
@@ -366,230 +364,534 @@ footer{
     <div class="spec"><dt>Retrieve → rerank</dt><dd>10 → 3</dd></div>
     <div class="spec"><dt>Gate threshold</dt><dd>0.20 <small>sigmoid</small></dd></div>
     <div class="spec"><dt>Retrieval mode</dt><dd>dense <small>hybrid measured</small></dd></div>
-    <div class="spec"><dt>Tests</dt><dd>114 <small>offline</small></dd></div>
+    <div class="spec"><dt>Tests</dt><dd>131 <small>offline</small></dd></div>
   </dl>
 </header>
 
-<!-- ══════════════ 1. TWO TRACKS ══════════════ -->
+<!-- ══════════════ 00. THE WHOLE PIPELINE, AS A PICTURE ══════════════ -->
 <section>
   <div class="sec-head">
-    <span class="sec-num">01 — SHAPE</span>
-    <h2>Two pipelines, one meeting point</h2>
-    <p>The most common misreading of RAG is treating it as a single flow. It is two.
-    Ingest is slow, batched, and runs when documents change. Query is fast, per-question,
-    and never touches the raw files. They share only the store.</p>
+    <span class="sec-num">00 — THE PICTURE</span>
+    <h2>The whole pipeline, before any of the decisions</h2>
+    <p>Two separate flows that share one thing: the vector store. Ingest runs in a batch,
+    only when documents change. Query runs once per question, and never touches the
+    original files — only what ingest already turned into vectors. Read this once for the
+    shape, then read the decision cards below for the "why" behind every box.</p>
   </div>
 
-  <div class="tracks">
-
-    <div class="track">
-      <span class="track-tag">Track A · build time</span>
-      <h3>Ingest — you run this when documents change</h3>
-      <p><code>.\rag.cmd ingest --all</code></p>
-      <div class="flow">
-        <div class="node"><span class="n-i">01</span><span class="n-t">Load</span>
-          <span class="n-d">Read every <code>*.jsonl</code> in <code>data/tickets/</code></span></div>
-        <div class="node"><span class="n-i">02</span><span class="n-t">Chunk</span>
-          <span class="n-d">Split by one of 3 strategies. Metadata rides along.</span></div>
-        <div class="node"><span class="n-i">03</span><span class="n-t">Embed</span>
-          <span class="n-d">Bi-encoder, <b>document</b> side. Unit-normalized.</span></div>
-        <div class="node is-store"><span class="n-i">04</span><span class="n-t">Persist</span>
-          <span class="n-d">Vectors + chunks + <code>meta.json</code> provenance</span></div>
-      </div>
-      <div class="railway" aria-hidden="true"></div>
+  <div class="pipeline-map">
+    <p class="map-label">Ingest — <code>.\rag.cmd ingest --all</code> — runs when documents change</p>
+    <div class="map-row">
+      <div class="map-box is-io"><span class="mb-t">Documents</span><span class="mb-d">data/tickets/*.jsonl</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box"><span class="mb-t">Chunk</span><span class="mb-d">split into pieces</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box"><span class="mb-t">Embed</span><span class="mb-d">text → vectors</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box is-io"><span class="mb-t">Vector store</span><span class="mb-d">persisted to disk</span></div>
     </div>
 
-    <p class="converge">↓ &nbsp; both tracks meet at the store &nbsp; ↓</p>
+    <p class="map-junction">↓ the store built above is the ONLY thing the next flow reads ↓</p>
 
-    <div class="track">
-      <span class="track-tag">Track B · ask time</span>
-      <h3>Query — runs per question, never reads the .jsonl files</h3>
-      <p><code>.\rag.cmd ask "How long do refunds take?"</code></p>
-      <div class="flow">
-        <div class="node"><span class="n-i">01</span><span class="n-t">Embed query</span>
-          <span class="n-d">Same model, <b>query</b> side — prefixes differ</span></div>
-        <div class="node"><span class="n-i">02</span><span class="n-t">Filter + top-K</span>
-          <span class="n-d">Metadata narrows, then cosine picks 10</span></div>
-        <div class="node"><span class="n-i">03</span><span class="n-t">Rerank</span>
-          <span class="n-d">Cross-encoder rescores, keeps top 3</span></div>
-        <div class="node is-gate"><span class="n-i">04</span><span class="n-t">Score gate</span>
-          <span class="n-d">Below 0.20 → refuse, LLM never called</span></div>
-        <div class="node"><span class="n-i">05</span><span class="n-t">Generate</span>
-          <span class="n-d">Answer from excerpts only, with citations</span></div>
-      </div>
-      <div class="railway" aria-hidden="true"></div>
-    </div>
-
-  </div>
-</section>
-
-<!-- ══════════════ 2. INGEST DETAIL ══════════════ -->
-<section>
-  <div class="sec-head">
-    <span class="sec-num">02 — TRACK A</span>
-    <h2>Ingest, stage by stage</h2>
-    <p>Nothing watches the folder. Re-run this after adding documents, changing a chunk
-    preset, or switching the embedding model.</p>
-  </div>
-
-  <div class="stages">
-    <div class="stage">
-      <div class="stage-n">01</div>
-      <div class="stage-b">
-        <h3>Load tickets <span class="file">tickets.py → load_all()</span></h3>
-        <p>Globs <code>data/tickets/*.jsonl</code>, one JSON object per line, and concatenates
-        every file it finds. Six fields are required: <code>ticket_id</code>, <code>subject</code>,
-        <code>product</code>, <code>category</code>, <code>status</code>, <code>priority</code>.
-        A malformed line names its own file and line number rather than failing silently.</p>
-        <p><code>ticket_id</code> becomes the citation label — it is what appears as
-        <code>[TIC-1001]</code> in the final answer.</p>
-      </div>
-    </div>
-
-    <div class="stage">
-      <div class="stage-n">02</div>
-      <div class="stage-b">
-        <h3>Chunk <span class="file">chunking.py → build_chunks()</span></h3>
-        <p>Three strategies. <code>flat</code> slices the whole corpus into character windows.
-        <code>ticket</code> makes one chunk per ticket. <code>section</code> packs conversation
-        turns under a repeated header so each fragment names its own ticket.</p>
-        <div class="note"><b>This is the decision that matters most.</b> Not chunk size —
-        strategy. See section 05.</div>
-      </div>
-    </div>
-
-    <div class="stage">
-      <div class="stage-n">03</div>
-      <div class="stage-b">
-        <h3>Embed documents <span class="file">embed.py → encode_documents()</span></h3>
-        <p>Turns each chunk into a 384-dimension vector positioned by meaning, so
-        “why am I getting 429” lands near “rate limit exceeded” despite sharing no words.</p>
-        <p>Document and query encoding are deliberately separate methods. E5 needs
-        <code>passage:</code> here and <code>query:</code> on the other track; BGE needs an
-        instruction on queries only; MiniLM needs neither. Using the wrong one degrades
-        retrieval with <strong>no error at all</strong>.</p>
-      </div>
-    </div>
-
-    <div class="stage">
-      <div class="stage-n">04</div>
-      <div class="stage-b">
-        <h3>Persist <span class="file">store.py / qdrant_store.py</span></h3>
-        <p>Writes vectors, chunks with their metadata, and a <code>meta.json</code> recording
-        which embedding model built the index. Two backends behind one interface: numpy
-        (exact brute force, fully inspectable) or Qdrant (real vector DB, embedded or server).</p>
-        <p>That provenance file is load-bearing. Swap the embedding model without
-        re-ingesting and you would otherwise get either a raw shape error or — when
-        dimensions happen to match, which is common — silently garbage rankings.</p>
-      </div>
+    <p class="map-label">Query — <code>.\rag.cmd ask "..."</code> — runs once per question</p>
+    <div class="map-row">
+      <div class="map-box is-io"><span class="mb-t">Question</span><span class="mb-d">typed by a user</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box"><span class="mb-t">Embed</span><span class="mb-d">same model, query side</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box"><span class="mb-t">Retrieve</span><span class="mb-d">+ optional filter</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box"><span class="mb-t">Rerank</span><span class="mb-d">10 candidates → 3</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box is-gate"><span class="mb-t">Score gate</span><span class="mb-d">good enough to answer?</span></div>
+      <div class="map-arrow">→</div>
+      <div class="map-box is-io"><span class="mb-t">Generate</span><span class="mb-d">answer + citations, or refuse</span></div>
     </div>
   </div>
 </section>
 
-<!-- ══════════════ 3. QUERY DETAIL ══════════════ -->
+<!-- ══════════════ D1. LOAD DOCUMENTS ══════════════ -->
 <section>
   <div class="sec-head">
-    <span class="sec-num">03 — TRACK B</span>
-    <h2>Query, stage by stage</h2>
-    <p>A funnel that gets narrower and more expensive at every step: thousands of chunks
-    → 10 candidates → 3 finalists → one answer, or none.</p>
+    <span class="sec-num">01 — INGEST</span>
+    <h2>Step 1 of 4 — getting documents into the app</h2>
   </div>
 
-  <div class="stages">
-    <div class="stage">
-      <div class="stage-n">01</div>
-      <div class="stage-b">
-        <h3>Embed the question <span class="file">embed.py → encode_queries()</span></h3>
-        <p>Same model as ingest, opposite side of the asymmetry.</p>
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">01</span>
+      <div>
+        <h3 class="decision-title">Load documents<span class="decision-file">tickets.py → load_all()</span></h3>
+        <p class="decision-ask">Q: what format do documents have to be in before anything else can happen?</p>
       </div>
     </div>
 
-    <div class="stage">
-      <div class="stage-n">02</div>
-      <div class="stage-b">
-        <h3>Metadata filter, then top-K <span class="file">filters.py → retrieve.py</span></h3>
-        <p>Optional <code>--filter product=Billing</code> narrows the candidate set
-        <em>before</em> ranking. Then cosine similarity picks the nearest 10.</p>
-        <p>Filtering is the clean fix for genuinely ambiguous questions. “What is my rate
-        limit?” has three different correct answers in this corpus depending on plan — no
-        reranker can resolve that, because the missing information is not in the question.
-        The filter supplies it.</p>
-        <div class="note"><b>Pre-filter vs post-filter.</b> Exact search filters for free:
-        shrink, then rank. A graph index cannot — which is why Qdrant needs payload
-        indexes to filter without wrecking recall.</div>
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Generic file loader</span>
+        <p class="opt-desc">Accept whatever shows up — PDF, DOCX, plain markdown — and extract raw text from each.</p>
+        <p class="opt-trade"><span class="plus">+</span> Drop in anything, no schema to satisfy.</p>
+        <p class="opt-trade"><span class="minus">−</span> Throws away structure: no ticket id, product, status, or plan to filter or cite by.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Database connector</span>
+        <p class="opt-desc">Read tickets live from wherever the real help desk stores them (Zendesk, a SQL table).</p>
+        <p class="opt-trade"><span class="plus">+</span> Always current, no export step.</p>
+        <p class="opt-trade"><span class="minus">−</span> A live dependency and credentials just to study retrieval — the wrong trade for this project.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">Structured JSONL, one ticket per line</span>
+        <p class="opt-desc">A fixed schema: <code>ticket_id</code>, <code>subject</code>, <code>product</code>,
+        <code>category</code>, <code>status</code>, <code>priority</code> required; conversation and
+        resolution carried as real fields, not flattened into one blob of text.</p>
+        <p class="opt-trade"><span class="plus">+</span> Metadata rides along to every chunk, for filtering and exact citations.</p>
+        <p class="opt-trade"><span class="minus">−</span> A different real corpus needs a new loader — this one only reads this shape.</p>
       </div>
     </div>
 
-    <div class="stage">
-      <div class="stage-n">03</div>
-      <div class="stage-b">
-        <h3>Cross-encoder rerank <span class="file">rerank.py → rerank()</span></h3>
-        <p>The bi-encoder never saw the query and the chunk together — it compared two
-        vectors made independently. The cross-encoder feeds <code>[query, chunk]</code>
-        through the transformer as one input, so it can model word-level interaction.
-        It costs a full forward pass per pair, which is why it only ever sees 10.</p>
-        <p>Raw output is an unbounded logit, roughly −11 to +11. A sigmoid puts it on a
-        0–1 probability scale so the gate threshold means something. Sigmoid is monotonic,
-        so this never reorders — it only makes the number interpretable.</p>
+    <div class="why">
+      <h4>Why, for this project</h4>
+      <p>This app was actually built the generic way first — <code>data/docs/*.md</code> and
+      the unused <code>docs_dir</code> config field are what's left of that attempt, kept
+      as a fossil rather than deleted. It got replaced because a flat markdown file has no
+      <code>product</code>, no <code>status</code>, no ticket id to cite — exactly the
+      metadata that later makes filtering (step 6) and trustworthy citations (step 9)
+      possible at all. A malformed JSONL line raises immediately, naming its own file and
+      line number, rather than silently skipping a bad ticket.</p>
+      <p><code>ticket_id</code> is the one field with an extra job: it becomes the literal
+      citation label — it's what shows up as <code>[TIC-1001]</code> in the final answer.</p>
+    </div>
+  </div>
+
+  <!-- ══════════════ D2. CHUNK ══════════════ -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">02</span>
+      <div>
+        <h3 class="decision-title">Chunk<span class="decision-file">chunking.py → build_chunks()</span></h3>
+        <p class="decision-ask">Q: how do we split ticket text into pieces small enough to embed and cite accurately?</p>
       </div>
     </div>
 
-    <div class="stage">
-      <div class="stage-n">04</div>
-      <div class="stage-b">
-        <h3>Score gate <span class="file">pipeline.py</span></h3>
-        <p>The decision point. Detailed in section 04.</p>
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Flat character windows</span>
+        <p class="opt-desc">Concatenate every ticket into one document, then slice it every N characters, ignoring where one ticket ends and the next begins.</p>
+        <p class="opt-trade"><span class="plus">+</span> Trivial to implement, works on any text, no document structure needed.</p>
+        <p class="opt-trade"><span class="minus">−</span> A window can start in one ticket and end in the next — see the measurement below.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen (default)</span>
+        <span class="opt-name">One chunk per ticket</span>
+        <p class="opt-desc">Each ticket becomes exactly one chunk (splitting further only if a single ticket exceeds the size limit).</p>
+        <p class="opt-trade"><span class="plus">+</span> The boundary IS the document — a citation can never span two tickets.</p>
+        <p class="opt-trade"><span class="minus">−</span> A very long ticket still needs a fallback split.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Turn-based / section</span>
+        <p class="opt-desc">Pack conversation turns together under a repeated header naming the ticket, so even a partial fragment is self-describing.</p>
+        <p class="opt-trade"><span class="plus">+</span> Resilient to long tickets without losing the "no bleed" guarantee.</p>
+        <p class="opt-trade"><span class="minus">−</span> More chunks total; the header text repeats, costing a little storage.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Semantic / recursive splitting <span style="color:var(--chalk-3);font-weight:400">(exists elsewhere, not built here)</span></span>
+        <p class="opt-desc">Split on embedding-distance jumps between sentences, or recursively by markdown/HTML structure (the common LangChain-style approach).</p>
+        <p class="opt-trade"><span class="plus">+</span> Adapts to prose that has no other structure.</p>
+        <p class="opt-trade"><span class="minus">−</span> Unnecessary here — tickets already have a hard structural boundary (the ticket itself); using it is simpler and stronger than inferring one.</p>
       </div>
     </div>
 
-    <div class="stage">
-      <div class="stage-n">05</div>
-      <div class="stage-b">
-        <h3>Generate, then verify <span class="file">generate.py</span></h3>
-        <p>The prompt supplies only the surviving excerpts, each labelled with the exact
-        ticket id the model is asked to cite. Afterwards every citation the model emitted
-        is checked against what it was actually shown.</p>
+    <div class="why">
+      <h4>Why, for this project</h4>
+      <p>All four strategies exist in the codebase as configurable presets (A/B = flat at two
+      sizes, C = ticket, D = section) specifically so the effect is measurable, not assumed.
+      It is:</p>
+    </div>
+
+    <div class="bleed-demo" style="margin-top:20px">
+      <div class="bleed-row">
+        <div class="bleed-label">Preset A · <span style="color:var(--amber)">flat / 500 chars</span> — the window ignores the seam</div>
+        <div class="tape">
+          <div class="tape-strip">
+            <div class="tk tk-a"><span class="tk-id">TIC-1001</span>
+              <p>Free plan is capped at 60 requests per minute per API key. Once you cross it
+              we return 429 with a Retry-After header telling you how many seconds to wait.
+              Check X-RateLimit-Remaining on every response.</p></div>
+            <div class="seam" aria-hidden="true"></div>
+            <div class="tk tk-b"><span class="tk-id">TIC-1002</span>
+              <p>Pro is 600 requests per minute per API key. Your batch job is bursting to
+              roughly 900 req/min for short windows. The limiter uses a fixed one-minute
+              window, not a rolling average.</p></div>
+          </div>
+          <div class="window" style="left:30%;right:26%">
+            <span class="window-tag">500-char window → cited as [TIC-1001]</span>
+          </div>
+        </div>
+        <div class="verdict bad"><span class="mark">✕</span>
+          <span>The chunk contains Pro's 600 req/min but is attributed to TIC-1001, the Free-plan
+          ticket. A confident answer with the wrong source.</span></div>
       </div>
+
+      <div class="bleed-row" style="margin-bottom:8px">
+        <div class="bleed-label">Preset C · <span style="color:var(--cyan)">ticket / one chunk each</span> — the window <em>is</em> the boundary</div>
+        <div class="tape">
+          <div class="tape-strip">
+            <div class="tk tk-a"><span class="tk-id">TIC-1001</span>
+              <p>Free plan is capped at 60 requests per minute per API key. Once you cross it
+              we return 429 with a Retry-After header telling you how many seconds to wait.
+              Check X-RateLimit-Remaining on every response.</p></div>
+            <div class="seam" aria-hidden="true"></div>
+            <div class="tk tk-b"><span class="tk-id">TIC-1002</span>
+              <p>Pro is 600 requests per minute per API key. Your batch job is bursting to
+              roughly 900 req/min for short windows. The limiter uses a fixed one-minute
+              window, not a rolling average.</p></div>
+          </div>
+          <div class="window window--ok" style="left:0;right:50%">
+            <span class="window-tag">chunk → cited as [TIC-1001]</span>
+          </div>
+        </div>
+        <div class="verdict good"><span class="mark">✓</span>
+          <span>Every citation names exactly the ticket its text came from.</span></div>
+      </div>
+    </div>
+
+    <div class="tbl-wrap" style="margin-top:22px">
+      <table>
+        <caption>Measured on the shipped corpus — <code>.\rag.cmd chunks --all</code></caption>
+        <thead><tr><th>Preset</th><th>Strategy</th><th class="num">Size</th>
+          <th class="num">Chunks</th><th class="num">Avg chars</th><th>Boundary bleed</th></tr></thead>
+        <tbody>
+          <tr><td>A</td><td>flat</td><td class="num">500</td><td class="num">60</td><td class="num">492</td><td class="bad-v">42/60 · 70%</td></tr>
+          <tr><td>B</td><td>flat</td><td class="num">1000</td><td class="num">30</td><td class="num">984</td><td class="bad-v">29/30 · 97%</td></tr>
+          <tr class="is-best"><td>C</td><td>ticket</td><td class="num">2000</td><td class="num">36</td><td class="num">732</td><td class="good-v">0/36 · 0%</td></tr>
+          <tr class="is-best"><td>D</td><td>section</td><td class="num">700</td><td class="num">62</td><td class="num">476</td><td class="good-v">0/62 · 0%</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="why">
+      <p><strong>Doubling the chunk size made bleeding worse, not better — 70% → 97%.</strong>
+      Bigger windows span more boundaries; "bigger chunks preserve more context" is a rule
+      that only holds for continuous prose with no natural breaks. Preset C uses the
+      <em>largest</em> chunks of all four and bleeds nothing, because its boundary is the
+      ticket's own, not a character count. Preset A is kept on purpose as the negative
+      control — it is not a bug to fix, it is the measurement that justifies picking C.</p>
+    </div>
+  </div>
+
+  <!-- ══════════════ D3. EMBED DOCUMENTS ══════════════ -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">03</span>
+      <div>
+        <h3 class="decision-title">Embed documents<span class="decision-file">embed.py → encode_documents()</span></h3>
+        <p class="decision-ask">Q: how do we turn each chunk's text into something searchable by meaning?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Keyword index only (BM25)</span>
+        <p class="opt-desc">Score chunks by exact term overlap with the query — no vectors at all.</p>
+        <p class="opt-trade"><span class="plus">+</span> Perfect for exact codes and ids, zero model cost.</p>
+        <p class="opt-trade"><span class="minus">−</span> Matches words, not meaning — "cut off" never finds "rate limit exceeded".</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">Bi-encoder embeddings</span>
+        <p class="opt-desc">A transformer turns each chunk into a fixed-length vector, once, at ingest time — query and document vectors are compared later with plain cosine similarity.</p>
+        <p class="opt-trade"><span class="plus">+</span> Pre-computed per document; a search is one matrix multiply.</p>
+        <p class="opt-trade"><span class="minus">−</span> Never sees the query and the document together — can't model fine word-level interaction (that's what step 7, rerank, is for).</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Hosted embedding API <span style="color:var(--chalk-3);font-weight:400">(OpenAI, Cohere)</span></span>
+        <p class="opt-desc">Send text to a paid API and get a vector back, instead of running a model locally.</p>
+        <p class="opt-trade"><span class="plus">+</span> No local GPU/CPU cost, often strong quality.</p>
+        <p class="opt-trade"><span class="minus">−</span> Network dependency and per-token cost for something that runs constantly at ingest.</p>
+      </div>
+    </div>
+
+    <p class="options-label">Which bi-encoder — also a real, swappable choice</p>
+    <div class="tbl-wrap">
+      <table>
+        <caption>models registered in embed.py — <code>.\rag.cmd models</code></caption>
+        <thead><tr><th>Model</th><th>Params</th><th>Query prefix</th><th>Passage prefix</th></tr></thead>
+        <tbody>
+          <tr class="is-best"><td>MiniLM-L6-v2 <span style="color:var(--cyan)">(active)</span></td><td class="num">22M</td><td>—</td><td>—</td></tr>
+          <tr><td>BAAI/bge-small-en-v1.5</td><td class="num">33M</td><td>instruction text</td><td>—</td></tr>
+          <tr><td>intfloat/e5-small-v2</td><td class="num">33M</td><td><code>query: </code></td><td><code>passage: </code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="why">
+      <h4>Why, for this project</h4>
+      <p>MiniLM is the default because it's symmetric (no prefix bookkeeping to get wrong),
+      small enough to run on CPU in this demo, and close enough on MTEB's retrieval column
+      to the larger alternatives that the difference doesn't matter at 36 tickets. BGE and E5
+      are wired in and swappable via <code>bi_encoder_model</code> in <code>config.yaml</code> —
+      the point of keeping three is that E5 and BGE are <strong>asymmetric</strong>: the query
+      needs a different prefix than the document. Get that backwards and retrieval quietly
+      gets worse with <strong>no error at all</strong> — which is exactly why
+      <code>encode_queries()</code> and <code>encode_documents()</code> are two different
+      methods instead of one, so the prefix can never be forgotten on one side.</p>
+    </div>
+  </div>
+
+  <!-- ══════════════ D4. STORE ══════════════ -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">04</span>
+      <div>
+        <h3 class="decision-title">Persist<span class="decision-file">store.py / qdrant_store.py</span></h3>
+        <p class="decision-ask">Q: where do the vectors live so a question can search them later?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen (default)</span>
+        <span class="opt-name">Hand-rolled numpy store</span>
+        <p class="opt-desc">Vectors in one array, search is a matrix multiply plus a top-k sort — brute force, exact, no approximation.</p>
+        <p class="opt-trade"><span class="plus">+</span> Zero dependencies, fully inspectable, always exactly correct.</p>
+        <p class="opt-trade"><span class="minus">−</span> O(N) per query — fine at 36 tickets, not at 36 million.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Also implemented</span>
+        <span class="opt-name">Qdrant</span>
+        <p class="opt-desc">A real vector database behind the same interface — embedded (a local file, prototyping) or a server (real HNSW).</p>
+        <p class="opt-trade"><span class="plus">+</span> Real payload filtering, real persistence API, a real HNSW index — <em>if</em> you run the server.</p>
+        <p class="opt-trade"><span class="minus">−</span> Embedded mode is brute force too — it accepts HNSW config and quietly ignores it.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Chroma / pgvector / Pinecone <span style="color:var(--chalk-3);font-weight:400">(not implemented)</span></span>
+        <p class="opt-desc">Other real vector stores with the same job: Chroma (easiest embedded start), pgvector (it's just Postgres — joins and one backup story), Pinecone (managed, no ops).</p>
+        <p class="opt-trade"><span class="plus">+</span> Each fits a different production constraint.</p>
+        <p class="opt-trade"><span class="minus">−</span> Out of scope here — the goal was proving the numpy-vs-real-vector-DB interface generalizes, not surveying every vendor.</p>
+      </div>
+    </div>
+
+    <div class="why">
+      <h4>Why, for this project</h4>
+      <p>At 36 tickets, exact brute force is both correct <em>and</em> fast — there's no
+      accuracy to trade away for speed yet, so reaching for an approximate index would add
+      complexity with no benefit. numpy stays the default specifically because it's
+      inspectable: you can open <code>vectors.npy</code> and see exactly what's stored. Qdrant
+      exists alongside it, behind the identical <code>SearchBackend</code> interface, so the
+      vector-DB concepts (payload filtering, HNSW's recall/latency trade) are real and testable
+      rather than just described. A <code>meta.json</code> written next to every store records
+      which embedding model built it — swap models without re-ingesting and you'd otherwise get
+      a raw shape error, or worse, silently wrong rankings when dimensions happen to match.</p>
     </div>
   </div>
 </section>
 
-<!-- ══════════════ 4. THE GATE ══════════════ -->
+<!-- ══════════════ QUERY-TIME DECISIONS ══════════════ -->
 <section>
   <div class="sec-head">
-    <span class="sec-num">04 — THE GATE</span>
-    <h2>Four ways out</h2>
-    <p>This is the part that makes the app trustworthy rather than merely fluent. Three of
-    the four exits produce “I don't know”, and two of those never spend a token.</p>
+    <span class="sec-num">05 — QUERY</span>
+    <h2>The other five steps — what happens per question</h2>
+    <p>A funnel that gets narrower and more expensive at every step: the whole corpus →
+    10 candidates → 3 finalists → one answer, or a refusal.</p>
   </div>
 
-  <div class="gate-grid">
-    <div class="exit exit--stop">
-      <span class="code">no-candidates</span>
-      <p>The metadata filter removed everything. There is nothing to reason over.</p>
-      <span class="llm">LLM not called</span>
+  <!-- D5. EMBED QUERY -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">05</span>
+      <div>
+        <h3 class="decision-title">Embed the question<span class="decision-file">embed.py → encode_queries()</span></h3>
+        <p class="decision-ask">Q: does the question get embedded the same way as a document?</p>
+      </div>
     </div>
-    <div class="exit exit--stop">
-      <span class="code">below-threshold</span>
-      <p>Best cross-encoder score fell under 0.20. The corpus does not contain the answer,
-      so refuse rather than let the model improvise from weak context.</p>
-      <span class="llm">LLM not called</span>
-    </div>
-    <div class="exit exit--stop">
-      <span class="code">model-refused</span>
-      <p>Context passed the gate but the model still declined. Its sources are stripped —
-      attaching citations to a non-answer credits documents for something they never said.</p>
-      <span class="llm">LLM called · sources cleared</span>
-    </div>
-    <div class="exit exit--go">
-      <span class="code">answered</span>
-      <p>Citations parsed and checked against the supplied excerpts. Any id the model
-      invented is reported as a hallucinated citation.</p>
-      <span class="llm">LLM called · citations verified</span>
+    <div class="why" style="border-left-color:var(--line)">
+      <p>Same model as ingest, but the <em>query</em> side of the asymmetry (step 3). No new
+      decision here — this exists as its own step because forgetting the distinction is the
+      single easiest way to quietly break retrieval on an asymmetric model.</p>
     </div>
   </div>
 
-  <div class="term" style="margin-top:22px">
+  <!-- D6. RETRIEVE + FILTER -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">06</span>
+      <div>
+        <h3 class="decision-title">Retrieve<span class="decision-file">retrieve.py / filters.py / hybrid.py</span></h3>
+        <p class="decision-ask">Q: out of every chunk in the store, which ones are even worth reranking?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered — candidate generation</p>
+    <div class="options">
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen (default)</span>
+        <span class="opt-name">Dense only (cosine)</span>
+        <p class="opt-desc">Rank every chunk by cosine similarity to the query vector, take the top 10.</p>
+        <p class="opt-trade"><span class="plus">+</span> Catches paraphrase with zero shared vocabulary.</p>
+        <p class="opt-trade"><span class="minus">−</span> Weak on exact tokens (ids, codes) — just one point in embedding space among many.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">BM25 only</span>
+        <p class="opt-desc">Rank by exact keyword overlap instead — see step 12 (Week 4).</p>
+        <p class="opt-trade"><span class="plus">+</span> Deterministic on exact terms.</p>
+        <p class="opt-trade"><span class="minus">−</span> Blind to meaning entirely.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Hybrid (dense + BM25, fused by RRF)</span>
+        <p class="opt-desc">Built and measured in Week 4 — <code>retrieval.mode: hybrid</code> in config.</p>
+        <p class="opt-trade"><span class="plus">+</span> In principle, the best of both.</p>
+        <p class="opt-trade"><span class="minus">−</span> Measured on this corpus: didn't help. Full story in section 13.</p>
+      </div>
+    </div>
+
+    <p class="options-label">A second, independent lever — metadata filtering</p>
+    <div class="options">
+      <div class="option is-chosen">
+        <span class="opt-badge">Available, opt-in</span>
+        <span class="opt-name"><code>--filter product=Billing</code></span>
+        <p class="opt-desc">Shrink the candidate set to matching metadata <em>before</em> ranking, using fields that rode along since step 1 (product, status, plan tier).</p>
+        <p class="opt-trade"><span class="plus">+</span> Solves genuine ambiguity a reranker structurally cannot — "what's my rate limit?" has three different correct answers in this corpus depending on plan, and the missing information isn't in the question at all.</p>
+        <p class="opt-trade"><span class="minus">−</span> Requires the caller to know and supply the right field.</p>
+      </div>
+    </div>
+
+    <div class="why">
+      <h4>Why, for this project</h4>
+      <p>Dense retrieval is the default because this corpus is mostly natural-language
+      paraphrase questions, which is exactly what a bi-encoder is good at. Filtering and
+      hybrid search solve <em>different</em> problems and both stayed in the codebase rather
+      than picking one: filtering resolves ambiguity that's structurally unresolvable by
+      ranking alone (see section 06), while hybrid search was a genuine experiment (section
+      13) whose answer turned out to be "no" for this corpus.</p>
+      <p><b>Pre-filter vs. post-filter</b> matters here: exact search filters for free — shrink
+      the candidate set, then rank. An approximate graph index (HNSW) cannot do this cleanly,
+      which is why Qdrant needs a payload index up front to filter without wrecking recall.</p>
+    </div>
+  </div>
+
+  <!-- D7. RERANK -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">07</span>
+      <div>
+        <h3 class="decision-title">Rerank<span class="decision-file">rerank.py → rerank()</span></h3>
+        <p class="decision-ask">Q: is the bi-encoder's top-10 ordering good enough to hand to the LLM as-is?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">No reranking</span>
+        <p class="opt-desc">Trust the bi-encoder's cosine order and hand the top 3 straight to generation.</p>
+        <p class="opt-trade"><span class="plus">+</span> One fewer model, one fewer forward pass.</p>
+        <p class="opt-trade"><span class="minus">−</span> Cosine alone can't tell "Free plan, 60/min" from "Pro plan, 600/min" apart cleanly — near-duplicates confuse it.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">Cross-encoder reranking</span>
+        <p class="opt-desc">Feed <code>[query, chunk]</code> through the transformer together, one pair at a time, and re-sort by that score.</p>
+        <p class="opt-trade"><span class="plus">+</span> Reads word-level interaction the bi-encoder structurally cannot.</p>
+        <p class="opt-trade"><span class="minus">−</span> A full forward pass per candidate — only affordable because it only ever sees 10, not the whole corpus.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Hosted reranker <span style="color:var(--chalk-3);font-weight:400">(Cohere Rerank, BGE-reranker API)</span></span>
+        <p class="opt-desc">Same idea as the cross-encoder, run as a paid API instead of a local model.</p>
+        <p class="opt-trade"><span class="plus">+</span> Often stronger, no local model to manage.</p>
+        <p class="opt-trade"><span class="minus">−</span> Network + cost per query, for a project meant to run fully offline.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">MMR <span style="color:var(--chalk-3);font-weight:400">(different job, not a substitute)</span></span>
+        <p class="opt-desc">Maximal Marginal Relevance re-sorts for <em>diversity</em> — penalizing near-duplicate results — not for relevance.</p>
+        <p class="opt-trade"><span class="plus">+</span> Useful when top-10 is five copies of the same fact.</p>
+        <p class="opt-trade"><span class="minus">−</span> Doesn't address "is this chunk actually relevant" at all — a complement to reranking, not a replacement.</p>
+      </div>
+    </div>
+
+    <div class="why">
+      <h4>Why, for this project</h4>
+      <p>The bi-encoder never saw the query and the chunk together — it compared two vectors
+      made independently, at different times. The cross-encoder is the one stage built
+      specifically to fix that blind spot, and it's the most CPU-expensive stage per item for
+      exactly the same reason: reading both texts together is what makes it accurate, and
+      what makes it too slow to run over the whole corpus. Raw output is an unbounded logit
+      (roughly −11 to +11); a sigmoid squashes it onto 0–1 so the next step's threshold means
+      something interpretable. Sigmoid is monotonic, so this never changes the ranking — only
+      the number.</p>
+    </div>
+  </div>
+
+  <!-- D8. SCORE GATE -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">08</span>
+      <div>
+        <h3 class="decision-title">Score gate<span class="decision-file">pipeline.py</span></h3>
+        <p class="decision-ask">Q: is the best reranked chunk actually good enough to answer from?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">No gate</span>
+        <p class="opt-desc">Always pass the top chunks to the LLM, regardless of how weak the match is.</p>
+        <p class="opt-trade"><span class="plus">+</span> Never refuses.</p>
+        <p class="opt-trade"><span class="minus">−</span> The LLM will confidently answer from irrelevant context — the classic RAG hallucination.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Fixed, guessed threshold</span>
+        <p class="opt-desc">Pick a cutoff that "feels right" and hard-code it.</p>
+        <p class="opt-trade"><span class="plus">+</span> Simple.</p>
+        <p class="opt-trade"><span class="minus">−</span> No evidence it's actually the right number for this reranker, this corpus, this scale.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">Calibrated threshold, tuned by sweeping real data</span>
+        <p class="opt-desc"><code>eval --sweep</code> replays the gate across many thresholds against the gold set and reports where false refusals start.</p>
+        <p class="opt-trade"><span class="plus">+</span> The number (0.20) is evidence, not a guess.</p>
+        <p class="opt-trade"><span class="minus">−</span> Tuned on this corpus — will not transfer to a different one without re-sweeping.</p>
+      </div>
+    </div>
+
+    <div class="why">
+      <h4>Why the gate reads the RERANK score, not retrieval</h4>
+      <p>Cosine similarity from step 6 is always positive-ish and would not gate anything
+      useful — it has no calibrated zero point. The sigmoid-scaled cross-encoder score does.
+      Below 0.20, refuse and <strong>never call the LLM</strong> — <code>used_llm=False</code>
+      is the observable, testable proof that this happened, not just a claim in a log line.</p>
+    </div>
+
+    <p class="options-label" style="margin-top:22px">Four ways this stage can end</p>
+    <div class="gate-grid">
+      <div class="exit exit--stop">
+        <span class="code">no-candidates</span>
+        <p>The metadata filter removed everything. Nothing to reason over.</p>
+        <span class="llm">LLM not called</span>
+      </div>
+      <div class="exit exit--stop">
+        <span class="code">below-threshold</span>
+        <p>Best cross-encoder score under 0.20 — refuse rather than let the model improvise.</p>
+        <span class="llm">LLM not called</span>
+      </div>
+      <div class="exit exit--stop">
+        <span class="code">model-refused</span>
+        <p>Context passed the gate but the model declined anyway. Sources stripped.</p>
+        <span class="llm">LLM called · sources cleared</span>
+      </div>
+      <div class="exit exit--go">
+        <span class="code">answered</span>
+        <p>Citations parsed and checked against the supplied excerpts.</p>
+        <span class="llm">LLM called · citations verified</span>
+      </div>
+    </div>
+
+    <div class="term" style="margin-top:20px">
 <span class="cm"># in the corpus</span>
 <span class="p">></span> <span class="c">.\rag.cmd ask "How long does a bank transfer refund take?" --quiet</span>
 <span class="out">Answer: Bank transfer refunds take 15 business days from approval [TIC-1005].
@@ -601,154 +903,87 @@ Sources: TIC-1005
 <span class="stop">Answer: I don't know — that information is not in the provided documents.
 Sources: (none)
 (K=10 → N=3; best_score=0.0005; threshold=0.2; used_llm=False; gate=below-threshold)</span>
-  </div>
-  <p style="margin-top:14px;font-size:13px"><code>used_llm=False</code> is the observable
-  proof. Not that the model declined — that it was never asked.</p>
-</section>
-
-<!-- ══════════════ 5. SIGNATURE: BOUNDARY BLEED ══════════════ -->
-<section>
-  <div class="sec-head">
-    <span class="sec-num">05 — THE DEFECT</span>
-    <h2>Why chunking strategy beats chunk size</h2>
-    <p>Support tickets have hard boundaries. A character window does not know that, so it
-    produces chunks that begin inside one ticket and end inside the next — and the chunk is
-    then cited as whichever ticket it <em>started</em> in.</p>
+    </div>
   </div>
 
-  <div class="bleed-demo">
-
-    <div class="bleed-row">
-      <div class="bleed-label">Preset A · <span style="color:var(--amber)">flat / 500 chars</span> — the window ignores the seam</div>
-      <div class="tape">
-        <div class="tape-strip">
-          <div class="tk tk-a"><span class="tk-id">TIC-1001</span>
-            <p>Free plan is capped at 60 requests per minute per API key. Once you cross it
-            we return 429 with a Retry-After header telling you how many seconds to wait.
-            Check X-RateLimit-Remaining on every response.</p></div>
-          <div class="seam" aria-hidden="true"></div>
-          <div class="tk tk-b"><span class="tk-id">TIC-1002</span>
-            <p>Pro is 600 requests per minute per API key. Your batch job is bursting to
-            roughly 900 req/min for short windows. The limiter uses a fixed one-minute
-            window, not a rolling average.</p></div>
-        </div>
-        <div class="window" style="left:30%;right:26%">
-          <span class="window-tag">500-char window → cited as [TIC-1001]</span>
-        </div>
+  <!-- D9. GENERATE -->
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">09</span>
+      <div>
+        <h3 class="decision-title">Generate, then verify<span class="decision-file">generate.py</span></h3>
+        <p class="decision-ask">Q: once the gate says "yes", how do we stop the LLM from wandering off the excerpts?</p>
       </div>
-      <div class="verdict bad"><span class="mark">✕</span>
-        <span>The chunk contains Pro's 600 req/min but is attributed to TIC-1001, the Free-plan
-        ticket. A confident answer with the wrong source.</span></div>
     </div>
 
-    <div class="bleed-row">
-      <div class="bleed-label">Preset C · <span style="color:var(--cyan)">ticket / one chunk each</span> — the window <em>is</em> the boundary</div>
-      <div class="tape">
-        <div class="tape-strip">
-          <div class="tk tk-a"><span class="tk-id">TIC-1001</span>
-            <p>Free plan is capped at 60 requests per minute per API key. Once you cross it
-            we return 429 with a Retry-After header telling you how many seconds to wait.
-            Check X-RateLimit-Remaining on every response.</p></div>
-          <div class="seam" aria-hidden="true"></div>
-          <div class="tk tk-b"><span class="tk-id">TIC-1002</span>
-            <p>Pro is 600 requests per minute per API key. Your batch job is bursting to
-            roughly 900 req/min for short windows. The limiter uses a fixed one-minute
-            window, not a rolling average.</p></div>
-        </div>
-        <div class="window window--ok" style="left:0;right:50%">
-          <span class="window-tag">chunk → cited as [TIC-1001]</span>
-        </div>
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Unconstrained prompting</span>
+        <p class="opt-desc">Paste the context, ask the question, take whatever comes back.</p>
+        <p class="opt-trade"><span class="plus">+</span> Simplest possible prompt.</p>
+        <p class="opt-trade"><span class="minus">−</span> No citations to check, no format to hold the model to.</p>
       </div>
-      <div class="verdict good"><span class="mark">✓</span>
-        <span>Every citation names exactly the ticket its text came from. Structure supplies
-        the boundary, so it cannot be crossed.</span></div>
+      <div class="option">
+        <span class="opt-name">Prompt-only constraints</span>
+        <p class="opt-desc">Instruct the model to cite sources and refuse when unsure — and trust that it does.</p>
+        <p class="opt-trade"><span class="plus">+</span> Better than nothing.</p>
+        <p class="opt-trade"><span class="minus">−</span> A prompt instruction is a suggestion — models drift, especially under pressure to be helpful.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">Constrained prompt + programmatic verification</span>
+        <p class="opt-desc">Require exact-id citations matching the excerpt labels, then check every emitted citation against what was actually shown.</p>
+        <p class="opt-trade"><span class="plus">+</span> Catches drift instead of trusting it away.</p>
+        <p class="opt-trade"><span class="minus">−</span> More moving parts — four separate checks, all of which must survive a refactor.</p>
+      </div>
     </div>
 
+    <div class="why">
+      <h4>The four checks that make "constrained" actually true</h4>
+    </div>
+
+    <div class="checks" style="margin-top:14px">
+      <div class="check">
+        <div class="check-n">01</div>
+        <div>
+          <h3>Score gate — already covered in step 08</h3>
+          <p>Refuses before generation ever starts, on the rerank score specifically.</p>
+        </div>
+      </div>
+      <div class="check">
+        <div class="check-n">02</div>
+        <div>
+          <h3>Prompt labels match the citation format</h3>
+          <p>Excerpts are labelled <code>[TIC-1001]</code> — the exact token the model is
+          asked to cite. Labelling them <code>[1]</code>, <code>[2]</code> while demanding
+          ticket ids teaches the wrong format by example.</p>
+        </div>
+      </div>
+      <div class="check">
+        <div class="check-n">03</div>
+        <div>
+          <h3>Refusal detection strips sources</h3>
+          <p>Matching is punctuation-normalized — models rewrite the em dash in the refusal
+          string constantly, and an exact string comparison would misclassify a correct
+          refusal as a real, sourced answer.</p>
+        </div>
+      </div>
+      <div class="check">
+        <div class="check-n">04</div>
+        <div>
+          <h3>Citation verification</h3>
+          <p>Every id the model emitted is checked against what it was actually shown. A
+          citation naming a ticket never in context is reported as hallucinated — invisible
+          unless you look for it on purpose.</p>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <div class="tbl-wrap" style="margin-top:34px">
+  <div class="tbl-wrap" style="margin-top:8px">
     <table>
-      <caption>Measured on the shipped corpus — <code>.\rag.cmd chunks --all</code></caption>
-      <thead><tr><th>Preset</th><th>Strategy</th><th class="num">Size</th>
-        <th class="num">Chunks</th><th class="num">Avg chars</th><th>Boundary bleed</th></tr></thead>
-      <tbody>
-        <tr><td>A</td><td>flat</td><td class="num">500</td><td class="num">60</td><td class="num">492</td><td class="bad-v">42/60 · 70%</td></tr>
-        <tr><td>B</td><td>flat</td><td class="num">1000</td><td class="num">30</td><td class="num">984</td><td class="bad-v">29/30 · 97%</td></tr>
-        <tr class="is-best"><td>C</td><td>ticket</td><td class="num">2000</td><td class="num">36</td><td class="num">732</td><td class="good-v">0/36 · 0%</td></tr>
-        <tr class="is-best"><td>D</td><td>section</td><td class="num">700</td><td class="num">62</td><td class="num">476</td><td class="good-v">0/62 · 0%</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <p><strong>Doubling the chunk size made bleeding worse, not better — 70% → 97%.</strong>
-  Larger windows span more boundaries. The instinct that bigger chunks preserve more context
-  is right for continuous prose and exactly wrong for a corpus of discrete records. Preset C
-  uses the largest chunks of all and bleeds nothing, because its boundaries are the
-  document's own.</p>
-
-  <p>Preset A is kept deliberately as the negative control. It is not a bug to fix.</p>
-</section>
-
-<!-- ══════════════ 6. GROUNDING ══════════════ -->
-<section>
-  <div class="sec-head">
-    <span class="sec-num">06 — GROUNDING</span>
-    <h2>Four checkpoints, not one</h2>
-    <p>“Only answer from the documents” is a prompt instruction, and prompt instructions
-    are suggestions. These four are enforcement.</p>
-  </div>
-
-  <div class="checks">
-    <div class="check">
-      <div class="check-n">01</div>
-      <div>
-        <h3>Score gate — refuse before generating</h3>
-        <p>Reads the <em>rerank</em> score, not the retrieval score. Cosine similarity is
-        always positive-ish and would not gate anything useful.</p>
-      </div>
-    </div>
-    <div class="check">
-      <div class="check-n">02</div>
-      <div>
-        <h3>Prompt labels match the citation format</h3>
-        <p>Excerpts are labelled <code>[TIC-1001]</code> — the exact token the model is asked
-        to cite. Labelling them <code>[1]</code>, <code>[2]</code> while demanding ticket ids
-        teaches the wrong format by example, and the model will emit what it can see.</p>
-      </div>
-    </div>
-    <div class="check">
-      <div class="check-n">03</div>
-      <div>
-        <h3>Refusal detection strips sources</h3>
-        <p>Matching is punctuation-normalized. Models routinely rewrite the em dash in the
-        canonical refusal string, and an exact comparison would classify a correct refusal
-        as a real answer and then attach citations to it.</p>
-      </div>
-    </div>
-    <div class="check">
-      <div class="check-n">04</div>
-      <div>
-        <h3>Citation verification</h3>
-        <p>Every id the model emitted is checked against what it was shown. A citation naming
-        a ticket that was never in the context window is the clearest possible grounding
-        failure — and completely invisible unless you look for it.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ══════════════ 7. EVIDENCE ══════════════ -->
-<section>
-  <div class="sec-head">
-    <span class="sec-num">07 — EVIDENCE</span>
-    <h2>Does it actually work?</h2>
-    <p>20 questions with known answers, plus 4 deliberately absent from the corpus so the
-    refusal path is measured rather than assumed. Runs without the LLM, so it is free.</p>
-  </div>
-
-  <div class="tbl-wrap">
-    <table>
-      <caption>Retrieval &amp; gate accuracy — <code>.\rag.cmd eval --all</code></caption>
+      <caption>Result — retrieval &amp; gate accuracy, <code>.\rag.cmd eval --all</code></caption>
       <thead><tr><th>Preset</th><th>Strategy</th><th class="num">hit@K</th>
         <th class="num">top-1 bi</th><th class="num">top-1 reranked</th>
         <th class="num">Refusals</th><th class="num">False refusals</th></tr></thead>
@@ -760,136 +995,180 @@ Sources: (none)
       </tbody>
     </table>
   </div>
-
-  <p><strong>hit@K</strong> is the ceiling — if the right ticket never enters the top 10,
-  no reranker can recover it. <strong>False refusals</strong> counts only cases where the
-  right ticket was at rank 1 and the gate threw it away anyway; refusing when the top hit
-  is wrong is the gate doing its job, and is counted separately.</p>
-
-  <p>The threshold itself was picked by sweeping it, not by feel — <code>eval --sweep</code>
-  replays the gate across values and shows where false refusals start. It is tuned on 36
-  synthetic tickets and <strong>will not transfer</strong> to a real corpus.</p>
+  <p><strong>hit@K</strong> is the ceiling for everything downstream — if the right ticket
+  never enters the top 10, nothing later in the pipeline can recover it. Twenty answerable
+  questions plus four deliberately absent from the corpus, so the refusal path is measured,
+  not assumed.</p>
 </section>
 
-<!-- ══════════════ CHAPTER DIVIDER ══════════════ -->
+<!-- ══════════════ CHAPTER DIVIDER: WEEK 4 ══════════════ -->
 <div class="chapter">
-  <span class="chapter-eyebrow">Week 2</span>
+  <span class="chapter-eyebrow">Week 4</span>
   <h2 class="chapter-title">Debugging Retrieval</h2>
-  <p class="chapter-sub">Same app. The app from week 1 works, but sometimes it's wrong — and
-  "wrong sometimes" isn't fixable. This chapter separates the two kinds of wrong, tries
-  exactly one fix, and reports the number honestly, including what it didn't fix.</p>
+  <p class="chapter-sub">Same app. The app from week 3 works, but sometimes it's wrong — and
+  "wrong sometimes" isn't fixable on its own. This chapter separates the two kinds of wrong,
+  tries exactly one fix, and reports the number honestly, including what it didn't fix.</p>
 </div>
 
-<!-- ══════════════ 8. THE TWO FAILURE MODES ══════════════ -->
+<!-- ══════════════ D10. FAILURE SEPARATION ══════════════ -->
 <section>
   <div class="sec-head">
-    <span class="sec-num">08 — FAILURE SEPARATION</span>
-    <h2>Wrong document, or right document, wrong answer</h2>
-    <p>These are different bugs with different fixes. A smarter model fixes neither reliably —
-    it can't invent a document retrieval never handed it, and it can just as easily still
-    misread one that was right there. <code>label_failures()</code> in
-    <code>evaluate.py</code> sorts every gold question into a bucket by
-    running the real pipeline, not a re-derivation of its logic — so a label reflects exactly
-    what the live app did.</p>
+    <span class="sec-num">10 — DIAGNOSIS</span>
+    <h2>Step 1 — before fixing anything, name which bug it is</h2>
   </div>
 
-  <div class="gate-grid" style="margin-bottom:28px">
-    <div class="exit exit--stop" style="border-color:var(--amber)">
-      <span class="code" style="color:var(--amber)">retrieval</span>
-      <p>The ticket never reached the final top-3 shown to the LLM. No model, however good,
-      could have answered this correctly.</p>
-      <span class="llm" style="color:var(--amber);border-color:var(--line-dim)">bucket boundary: reranked_rank is None</span>
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">10</span>
+      <div>
+        <h3 class="decision-title">Failure separation<span class="decision-file">evaluate.py → label_failures()</span></h3>
+        <p class="decision-ask">Q: when the app answers wrong, is that a retrieval bug or a generation bug?</p>
+      </div>
     </div>
-    <div class="exit exit--stop">
-      <span class="code">generation</span>
-      <p>The ticket <em>was</em> in context, and the app still produced a wrong answer —
-      via the score gate refusing, or the model itself missing what it was given.</p>
-      <span class="llm">reranked_rank set, answer still wrong</span>
+
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Treat every wrong answer the same</span>
+        <p class="opt-desc">Log "wrong" and move on to the next question.</p>
+        <p class="opt-trade"><span class="plus">+</span> No extra machinery.</p>
+        <p class="opt-trade"><span class="minus">−</span> A smarter model fixes only ONE of the two bug types — you can't tell which fix to reach for.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">Sort every failure into a named bucket, by running the real pipeline</span>
+        <p class="opt-desc"><code>label_failures()</code> reuses <code>ask()</code> itself — not a re-derivation of its logic — so a label reflects exactly what the live app did, including the gate.</p>
+        <p class="opt-trade"><span class="plus">+</span> Points the next fix at the right stage.</p>
+        <p class="opt-trade"><span class="minus">−</span> Confirming a "generation" bucket needs a real LLM call — free retrieval-only checks can only prove "retrieval" or leave a case "unconfirmed".</p>
+      </div>
     </div>
-    <div class="exit exit--go">
-      <span class="code">pass</span>
-      <p>Ticket in context, answer correctly used it. Confirmed only with <code>--generate</code>.</p>
-      <span class="llm">17/22 on this run</span>
+
+    <div class="why">
+      <h4>The two buckets</h4>
+      <p><b style="color:var(--amber)">retrieval</b> — the ticket never reached the final
+      top-3 shown to the LLM. No model, however good, could have answered correctly; the
+      boundary is membership in the reranked list, not "rank exactly 1".</p>
+      <p><b style="color:var(--verm)">generation</b> — the ticket <em>was</em> in context,
+      and the app still produced a wrong answer — via the score gate refusing on a passing
+      document, or the model itself missing what it was handed.</p>
+    </div>
+
+    <p class="lead" style="font-size:15px;margin:20px 0 14px">Five real cases from
+    <code>.\rag.cmd debug --preset B --generate</code> — one run against the live pipeline,
+    no cherry-picking:</p>
+
+    <div class="inspect">
+      <div class="case is-retrieval">
+        <span class="case-tag">retrieval</span>
+        <div>
+          <p class="q">"Can a VAT number be added to an invoice after it was issued?" — expects TIC-1006</p>
+          <p class="evidence">Retrieved at rank 3, but reranked OUT of the top 3 shown to the LLM —
+          the <strong>cross-encoder's</strong> fault, not the retriever's.</p>
+        </div>
+      </div>
+      <div class="case is-retrieval">
+        <span class="case-tag">retrieval</span>
+        <div>
+          <p class="q">"duplicate charge" — expects TIC-1007</p>
+          <p class="evidence">Never entered the retrieved candidate set at all —
+          the <strong>bi-encoder's</strong> fault. Two questions, two different pipeline stages
+          at fault; "retrieval failure" is not one bug.</p>
+        </div>
+      </div>
+      <div class="case is-generation">
+        <span class="case-tag">generation</span>
+        <div>
+          <p class="q">"Is there an on-premise or self-hosted version?" — expects TIC-1036</p>
+          <p class="evidence">Correct ticket WAS in context at rank 1, but the <strong>score
+          gate</strong> refused anyway (best_score=0.086 &lt; threshold 0.2). Retrieval did its
+          job; the gate is what threw the answer away.</p>
+          <p class="answer">I don't know — that information is not in the provided documents.</p>
+        </div>
+      </div>
+      <div class="case is-generation">
+        <span class="case-tag">generation</span>
+        <div>
+          <p class="q">"What is the gateway timeout for synchronous requests?" — expects TIC-1027</p>
+          <p class="evidence">Same failure mode: correct ticket at rank 1, gate refused
+          (best_score=0.026 &lt; threshold 0.2).</p>
+          <p class="answer">I don't know — that information is not in the provided documents.</p>
+        </div>
+      </div>
+      <div class="case is-generation">
+        <span class="case-tag">generation</span>
+        <div>
+          <p class="q">"429 free plan" — expects TIC-1001</p>
+          <p class="evidence">Different root cause from the two above: correct ticket at rank 1,
+          <strong>passed</strong> the gate — but the <strong>model itself</strong> refused to
+          answer despite it being right there in the excerpt.</p>
+          <p class="answer">I don't know — that information is not in the provided documents.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="why">
+      <p>Two of these five never had a chance — the document was never in front of the model.
+      The other three prove the opposite failure exists too: the document was right there, and
+      the app said "I don't know" anyway, for two different reasons (gate threshold, model
+      judgment). Conflating these into one "it's wrong" bucket would point the next fix in the
+      wrong direction for 3 of these 5 questions.</p>
     </div>
   </div>
-
-  <p class="lead" style="font-size:15px;margin-bottom:14px">Five real cases from
-  <code>.\rag.cmd debug --preset B --generate</code> — one run against the live pipeline,
-  no cherry-picking:</p>
-
-  <div class="inspect">
-    <div class="case is-retrieval">
-      <span class="case-tag">retrieval</span>
-      <div>
-        <p class="q">"Can a VAT number be added to an invoice after it was issued?" — expects TIC-1006</p>
-        <p class="evidence">Retrieved at rank 3, but reranked OUT of the top 3 shown to the LLM —
-        the <strong>cross-encoder's</strong> fault, not the retriever's.</p>
-      </div>
-    </div>
-    <div class="case is-retrieval">
-      <span class="case-tag">retrieval</span>
-      <div>
-        <p class="q">"duplicate charge" — expects TIC-1007</p>
-        <p class="evidence">Never entered the retrieved candidate set at all —
-        the <strong>bi-encoder's</strong> fault. Two questions, two different pipeline stages
-        at fault; "retrieval failure" is not one bug.</p>
-      </div>
-    </div>
-    <div class="case is-generation">
-      <span class="case-tag">generation</span>
-      <div>
-        <p class="q">"Is there an on-premise or self-hosted version?" — expects TIC-1036</p>
-        <p class="evidence">Correct ticket WAS in context at rank 1, but the <strong>score
-        gate</strong> refused anyway (best_score=0.086 &lt; threshold 0.2). Retrieval did its
-        job; the gate is what threw the answer away.</p>
-        <p class="answer">I don't know — that information is not in the provided documents.</p>
-      </div>
-    </div>
-    <div class="case is-generation">
-      <span class="case-tag">generation</span>
-      <div>
-        <p class="q">"What is the gateway timeout for synchronous requests?" — expects TIC-1027</p>
-        <p class="evidence">Same failure mode: correct ticket at rank 1, gate refused
-        (best_score=0.026 &lt; threshold 0.2).</p>
-        <p class="answer">I don't know — that information is not in the provided documents.</p>
-      </div>
-    </div>
-    <div class="case is-generation">
-      <span class="case-tag">generation</span>
-      <div>
-        <p class="q">"429 free plan" — expects TIC-1001</p>
-        <p class="evidence">Different root cause from the two above: correct ticket at rank 1,
-        <strong>passed</strong> the gate — but the <strong>model itself</strong> refused to
-        answer despite it being right there in the excerpt.</p>
-        <p class="answer">I don't know — that information is not in the provided documents.</p>
-      </div>
-    </div>
-  </div>
-
-  <p style="margin-top:18px">Two of these five never had a chance — the document was
-  never in front of the model. The other three prove the opposite failure exists too: the
-  document was right there, and the app said "I don't know" anyway, for two different
-  reasons (gate threshold, model judgment). Conflating these into one "it's wrong" bucket
-  would point the next fix in the wrong direction for 3 of these 5 questions.</p>
 </section>
 
-<!-- ══════════════ 9. THE ONE CHANGE ══════════════ -->
+<!-- ══════════════ D11. THE ONE CHANGE ══════════════ -->
 <section>
   <div class="sec-head">
-    <span class="sec-num">09 — THE ONE CHANGE</span>
-    <h2>Add BM25, fuse by rank position (RRF)</h2>
-    <p>Dense retrieval compares meaning — it can match "why do I keep getting cut off" to
-    "rate limit exceeded" with no shared words. It is correspondingly bad at the opposite
-    case: an exact token is just one point in embedding space among many. BM25 is the other
-    direction — deterministic exact-term overlap, implemented from scratch in
-    <code>bm25.py</code> rather than via a dependency, the same reason
-    the numpy store is hand-rolled.</p>
-    <p><strong>Reciprocal Rank Fusion</strong> combines two rankings by position, not score —
-    a cosine similarity and a BM25 score live on incomparable scales, so summing them directly
-    is an arbitrary weighting in disguise. <code>RRF(d) = Σ 1/(k+rank<sub>r</sub>(d))</code>
-    across every ranking that contains d. This is the <strong>one</strong> thing this section
-    changes: chunking, embedding, the cross-encoder and the score gate are all untouched, so a
-    before/after comparison isolates exactly this fusion's effect.</p>
+    <span class="sec-num">11 — THE ONE CHANGE</span>
+    <h2>Step 2 — try exactly one retrieval fix, measure it</h2>
+  </div>
+
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">11</span>
+      <div>
+        <h3 class="decision-title">Improve retrieval<span class="decision-file">bm25.py / hybrid.py</span></h3>
+        <p class="decision-ask">Q: which one retrieval-side change is worth trying first?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered — the mentor rule is ONE change, not five</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Query rewriting</span>
+        <p class="opt-desc">Ask an LLM to rewrite a messy question into a cleaner search query before embedding it.</p>
+        <p class="opt-trade"><span class="plus">+</span> Can fix genuinely garbled input.</p>
+        <p class="opt-trade"><span class="minus">−</span> Costs an extra LLM call per question, and can rewrite AWAY the exact wording that would have matched.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">HyDE</span>
+        <p class="opt-desc">Generate a hypothetical answer first, then embed <em>that</em> and search with it instead of the raw question.</p>
+        <p class="opt-trade"><span class="plus">+</span> Can bridge a big vocabulary gap between question and answer style.</p>
+        <p class="opt-trade"><span class="minus">−</span> Another LLM call per question; the hypothetical answer can be confidently wrong and mislead the search.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen — this is the ONE change tested</span>
+        <span class="opt-name">Hybrid: dense + BM25, fused by RRF</span>
+        <p class="opt-desc">Add a from-scratch keyword index (<code>bm25.py</code>) and combine it with the existing dense ranking by Reciprocal Rank Fusion — position only, never blending raw scores from two incomparable scales.</p>
+        <p class="opt-trade"><span class="plus">+</span> No extra LLM call; catches exact ticket ids and codes dense retrieval structurally can't prioritize.</p>
+        <p class="opt-trade"><span class="minus">−</span> Result below: measured, didn't help on this corpus.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">MMR / better reranker</span>
+        <p class="opt-desc">Diversify the candidate set (MMR), or pay for a stronger reranker (Cohere Rerank, BGE-reranker).</p>
+        <p class="opt-trade"><span class="plus">+</span> Each addresses a real, different weakness.</p>
+        <p class="opt-trade"><span class="minus">−</span> Testing more than one change at once means you can't tell which one moved the number.</p>
+      </div>
+    </div>
+
+    <div class="why">
+      <p>Reciprocal Rank Fusion combines two rankings by <strong>position</strong>, not score —
+      <code>RRF(d) = Σ 1/(k+rank<sub>r</sub>(d))</code> across every ranking containing d. A
+      cosine similarity and a BM25 score live on incomparable scales, so summing them directly
+      would just be an arbitrary, hidden weighting. This is the <strong>one</strong> thing this
+      section changes: chunking, embedding, the cross-encoder, and the score gate are all
+      untouched, so the before/after comparison below isolates exactly this fusion's effect.</p>
+    </div>
   </div>
 
   <div class="bleed-label" style="margin-bottom:4px">Real query, preset A · "When is an account suspended after a failed payment?" (expects TIC-1032)</div>
@@ -928,25 +1207,9 @@ Sources: (none)
     </div>
   </div>
 
-  <p style="margin-top:20px">This is the honest mechanism, not a cherry-picked failure: RRF
-  fusion is not strictly additive. When one signal actively has nothing to contribute for the
-  right answer, adding it can dilute a ranking that was already correct — which is exactly
-  what the before/after measurement below confirms.</p>
-</section>
-
-<!-- ══════════════ 10. BEFORE / AFTER ══════════════ -->
-<section>
-  <div class="sec-head">
-    <span class="sec-num">10 — BEFORE / AFTER</span>
-    <h2>Did it help? Measured, not felt.</h2>
-    <p>Hit-rate@3, dense-only vs dense+BM25 fused — same embedder, same store, same candidate
-    pool size in both arms, so the retrieval strategy is the only variable. Run yourself with
-    <code>.\rag.cmd eval --all --compare-retrieval</code>.</p>
-  </div>
-
-  <div class="tbl-wrap">
+  <div class="tbl-wrap" style="margin-top:24px">
     <table>
-      <caption>Hit-rate@3 by preset — dense-only vs hybrid (dense + BM25, RRF k=60)</caption>
+      <caption>Result — hit-rate@3 by preset, dense-only vs hybrid (RRF k=60), <code>.\rag.cmd eval --all --compare-retrieval</code></caption>
       <thead><tr><th>Preset</th><th>Strategy</th><th class="num">Dense</th>
         <th class="num">Hybrid</th><th class="num">Δ</th><th class="num">Fixed</th>
         <th class="num">Regressed</th><th class="num">Still broken</th></tr></thead>
@@ -959,39 +1222,168 @@ Sources: (none)
     </table>
   </div>
 
-  <div class="gate-grid" style="margin-top:18px">
+  <div class="gate-grid">
     <div class="exit exit--stop">
       <span class="code">regressed by hybrid</span>
-      <p><strong>TIC-1032</strong> — "When is an account suspended after a failed payment?"
-      Dense rank 2 → hybrid miss, on both A and B. The exact case diagrammed above.</p>
+      <p><strong>TIC-1032</strong> — dense rank 2 → hybrid miss, on both A and B. The exact case diagrammed above.</p>
     </div>
     <div class="exit exit--stop" style="border-color:var(--amber)">
       <span class="code" style="color:var(--amber)">still not fixed</span>
       <p><strong>TIC-1005</strong> (A), <strong>TIC-1027</strong> and <strong>TIC-1007</strong>
-      (B) — missed under dense, still missed under hybrid. This change did not touch them.</p>
+      (B) — missed under dense, still missed under hybrid.</p>
     </div>
   </div>
 
-  <p style="margin-top:20px"><strong>Verdict: hybrid search did not help this corpus.</strong>
-  It cost nothing on the already-clean presets C and D (retrieval was already at 95–100%
-  hit-rate@3 — a ceiling effect, no failures left to fix), and it mildly hurt the flat-chunked
-  presets A and B. The root cause is upstream: last week's chunking-bleed defect means flat's
-  chunks contain boilerplate and neighbour-ticket text, and BM25 latches onto that shared
-  vocabulary just as readily as it would latch onto a genuinely relevant term. Hybrid search is
-  not a fix for bad chunking — it can amplify the confusion just as easily as resolve it.</p>
-
-  <p><code>retrieval.mode</code> stays at <code>dense</code> in <code>config.yaml</code>
-  because that is what the numbers say to do. The code path is real and tested either way —
-  worth revisiting on a larger or more keyword-heavy corpus, not this one.</p>
+  <div class="why">
+    <h4>Verdict, stated plainly</h4>
+    <p><strong>Hybrid search did not help this corpus.</strong> Nothing on the already-clean
+    presets C and D (retrieval was already at 95–100% hit-rate@3 — a ceiling effect, no
+    failures left to fix), and a mild regression on the flat-chunked presets. The root cause is
+    upstream, not in the fusion math: flat chunking's boundary-bleed defect (step 02) means
+    those chunks contain boilerplate and neighbour-ticket text, and BM25 latches onto that
+    shared vocabulary just as readily as it would latch onto a genuinely relevant term. Hybrid
+    search is not a fix for bad chunking — it can amplify the confusion as easily as resolve
+    it. <code>retrieval.mode</code> stays at <code>dense</code> in <code>config.yaml</code>
+    because that's what the numbers say, not a guess.</p>
+  </div>
 </section>
 
-<!-- ══════════════ 11. RUNNING IT ══════════════ -->
+<!-- ══════════════ CHAPTER DIVIDER: WEEK 5 ══════════════ -->
+<div class="chapter">
+  <span class="chapter-eyebrow">Week 5</span>
+  <h2 class="chapter-title">Error Analysis</h2>
+  <p class="chapter-sub">Eval and debug (weeks 3–4) measure known behaviors — the gold set
+  is curated on purpose, to confirm things already suspected. This chapter does the opposite:
+  read a fair, uncurated sample of real answers, and find the problems nobody predicted.</p>
+</div>
+
+<!-- ══════════════ D12. SAMPLING ══════════════ -->
 <section>
   <div class="sec-head">
-    <span class="sec-num">11 — RUNNING IT</span>
+    <span class="sec-num">12 — SAMPLING</span>
+    <h2>Step 1 — get a fair sample to read, not a convenient one</h2>
+  </div>
+
+  <div class="decision">
+    <div class="decision-head">
+      <span class="decision-num">12</span>
+      <div>
+        <h3 class="decision-title">Choose what to read<span class="decision-file">sampling.py → sample_questions()</span></h3>
+        <p class="decision-ask">Q: which ~20 answers do you actually sit down and read?</p>
+      </div>
+    </div>
+
+    <p class="options-label">Options considered</p>
+    <div class="options">
+      <div class="option">
+        <span class="opt-name">Read the curated gold set again</span>
+        <p class="opt-desc">Reuse <code>evaluate.GOLD</code> — the 26 questions already built to test known behaviors.</p>
+        <p class="opt-trade"><span class="plus">+</span> Already exists, already has known-correct answers to check against.</p>
+        <p class="opt-trade"><span class="minus">−</span> You already designed these to probe things you suspected — reading them is reading "the good examples", not a fair sample.</p>
+      </div>
+      <div class="option">
+        <span class="opt-name">Hand-pick 20 interesting-looking questions</span>
+        <p class="opt-desc">Skim recent usage and choose ones that look worth a closer look.</p>
+        <p class="opt-trade"><span class="plus">+</span> Feels efficient.</p>
+        <p class="opt-trade"><span class="minus">−</span> "Interesting-looking" is a bias — you find the failures you already know how to spot.</p>
+      </div>
+      <div class="option is-chosen">
+        <span class="opt-badge">Chosen</span>
+        <span class="opt-name">A second, uncurated pool + a seeded random draw</span>
+        <p class="opt-desc">57 questions with <strong>no answer key</strong> — clean lookups, ambiguous/compound/casual phrasing, out-of-corpus topics, false premises, fabricated ticket ids. <code>sample_questions(n, seed)</code> draws reproducibly.</p>
+        <p class="opt-trade"><span class="plus">+</span> The seed makes the sample provably not hand-picked after the fact — anyone can rerun it and get the same 20 back.</p>
+        <p class="opt-trade"><span class="minus">−</span> No population of real end users behind this app, so this is the most honest available substitute, not the real thing.</p>
+      </div>
+    </div>
+
+    <div class="why">
+      <p>A test enforces zero overlap between this pool and <code>GOLD</code> — sampling from
+      your own curated test set would be grading your own exam. Every trace is written to disk
+      as a complete, replayable record (question, every retrieved/reranked chunk with its score
+      and a text preview, the gate outcome, the final answer) specifically because
+      <code>Answer</code> otherwise vanishes the moment the process exits — there'd be nothing
+      left to read cold, a week later.</p>
+    </div>
+  </div>
+
+  <div class="term">
+<span class="cm"># draw 20 real traces, reproducibly, and write a blank coding sheet</span>
+<span class="p">></span> <span class="c">.\rag.cmd sample --n 20 --seed 42 --generate</span>
+  </div>
+</section>
+
+<!-- ══════════════ D13. TAXONOMY + RANKING ══════════════ -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">13 — TAXONOMY</span>
+    <h2>Step 2 — read every trace, THEN group, THEN rank</h2>
+    <p>Order matters here: a one-sentence honest note is written per trace with no category
+    in mind, before any grouping happens. See
+    <code>analysis/error_analysis.md</code> for the full 20-trace read — marked DRAFT, since
+    an AI drafting the notes and a human reading them independently are not the same exercise,
+    and the brief is explicit that this is the one part that resists automation.</p>
+  </div>
+
+  <p class="options-label">Severity rubric — defined before scoring, not fit to the data after</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th class="num">Score</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td>Cosmetic — wording or format only</td></tr>
+        <tr><td class="num">2</td><td>Minor inconvenience — unhelpful but not wrong</td></tr>
+        <tr><td class="num">3</td><td>Moderate — a real, answerable question gets an unhelpful non-answer</td></tr>
+        <tr><td class="num">4</td><td>Serious — a safety property holds only by luck, not by design</td></tr>
+        <tr><td class="num">5</td><td>Severe — an observed hallucinated fact stated with confidence</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <caption>Five named problems, from 20 real traces (seed 42) — ranked by frequency × severity</caption>
+      <thead><tr><th>Problem</th><th class="num">Freq / 20</th><th class="num">Severity</th><th class="num">F × S</th></tr></thead>
+      <tbody>
+        <tr class="is-best"><td>Fabricated ticket IDs aren't structurally checked</td><td class="num">2</td><td class="num">4</td><td class="num good-v">8</td></tr>
+        <tr><td>Near-duplicate tickets leave thin reranking margins</td><td class="num">1 confirmed + 3 close calls</td><td class="num">3</td><td class="num">3–9</td></tr>
+        <tr><td>Indirect, connect-the-dots answers get missed</td><td class="num">1</td><td class="num">3</td><td class="num">3</td></tr>
+        <tr><td>Partial knowledge triggers total refusal</td><td class="num">1</td><td class="num">2</td><td class="num">2</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="why">
+    <h4>Chosen target — fabricated ticket IDs aren't structurally checked</h4>
+    <p>Not the highest raw frequency, but the severity ceiling is what matters: this is the
+    only finding where the failure mode, if it ever actually fires, is a
+    <strong>confidently wrong answer attributing real content to a ticket that doesn't
+    exist</strong>. In the sample it was caught twice by two different, uncoordinated
+    mechanisms — the model's own judgment once, an absence of lucky keyword overlap once —
+    neither of which is a deliberate check.</p>
+    <h4 style="margin-top:14px">Prediction, written before implementing anything</h4>
+    <p>If the pipeline extracts any <code>TIC-####</code>-shaped token from the question and
+    checks it against the retrieved chunk sources before generation: (1) those two traces get
+    a specific refusal instead of the generic one, (2) the dependency on model judgment for
+    this failure mode drops to zero, (3) no regression on the 26-question gold set, since none
+    of them reference a ticket id at all. Re-running the same sample after the fix is how this
+    gets checked against reality, not just declared successful.</p>
+  </div>
+
+  <div class="note" style="margin-top:20px"><b>Benchmarks vs. this eval.</b> MMLU and
+  HumanEval measure a model's general capability, the same way regardless of what you build
+  with it. <code>GOLD</code> and this taxonomy measure something a public benchmark
+  structurally cannot: does <em>this app</em>, over <em>this corpus</em>, with <em>these</em>
+  chunking/retrieval/gate settings, answer correctly and refuse when it should. A model that
+  tops MMLU can still fail every question here if the chunking bleeds or the threshold is
+  miscalibrated.</div>
+</section>
+
+<!-- ══════════════ RUNNING IT ══════════════ -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">14 — RUNNING IT</span>
     <h2>Commands</h2>
     <p>Drop <code>.jsonl</code> files into <code>data/tickets/</code>, then ingest. There is no
-    file watcher and no UI — every step is explicit.</p>
+    file watcher and no UI — every step above is a command you type on purpose.</p>
   </div>
 
   <div class="term">
@@ -1020,6 +1412,9 @@ Sources: (none)
 <span class="cm"># label each gold question: wrong document, vs right document/wrong answer</span>
 <span class="p">></span> <span class="c">.\rag.cmd debug --preset B --generate</span>
 
+<span class="cm"># draw a fair random sample of real traces for error analysis</span>
+<span class="p">></span> <span class="c">.\rag.cmd sample --n 20 --seed 42 --generate</span>
+
 <span class="cm"># embedding model registry and per-family prefix rules</span>
 <span class="p">></span> <span class="c">.\rag.cmd models</span>
   </div>
@@ -1041,6 +1436,8 @@ Sources: (none)
         <tr><td>generate.py</td><td>Prompt, refusal detection, citation verification</td></tr>
         <tr><td>pipeline.py</td><td><strong>The only orchestrator.</strong> Holds the gate.</td></tr>
         <tr><td>evaluate.py</td><td>Gold set, hit@K/MRR, threshold sweep, failure labeling, retrieval-mode comparison</td></tr>
+        <tr><td>sampling.py</td><td>Uncurated question pool + seeded random sampler</td></tr>
+        <tr><td>traces.py</td><td>Durable, replayable records of real answers</td></tr>
         <tr><td>repl.py</td><td>The <code>chat</code> session — caches store, models and BM25 index per preset</td></tr>
       </tbody>
     </table>

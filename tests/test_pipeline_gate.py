@@ -10,7 +10,8 @@ import numpy as np
 from rag_app.chunking import Chunk
 from rag_app.generate import DONT_KNOW, is_refusal
 from rag_app.pipeline import ask
-from rag_app.store import StoreMeta, VectorStore, store_path_for_preset
+from rag_app.qdrant_store import QdrantStore, qdrant_path_for_preset
+from rag_app.store import StoreMeta
 
 from conftest import FakeReranker, FixedEmbedder, make_config
 
@@ -19,9 +20,11 @@ def _seed(cfg, preset="C"):
     chunks = [Chunk("TIC-001::0", "TIC-001", "Cursor pagination, max 100 per page",
                     {"ticket_id": "TIC-001", "product": "API"})]
     vectors = np.array([[1.0, 0.0]], dtype=np.float32)
-    VectorStore(chunks, vectors, StoreMeta("fake", 2, "ticket", 2000, 200, 1)).save(
-        store_path_for_preset(cfg.store_dir, preset)
-    )
+    meta = StoreMeta("fake", 2, "ticket", 2000, 200, 1)
+    path = qdrant_path_for_preset(cfg.store_dir, preset)
+    store = QdrantStore(meta_dir=path, path=path)
+    store.build(chunks, vectors, meta)
+    store.close()
 
 
 def test_score_gate_skips_llm(tmp_path):

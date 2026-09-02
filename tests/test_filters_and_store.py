@@ -5,7 +5,9 @@ import pytest
 
 from rag_app.chunking import Chunk
 from rag_app.filters import MetaFilter
-from rag_app.store import StoreMeta, VectorStore
+from rag_app.store import StoreMeta
+
+from conftest import make_qdrant_store
 
 
 def _unit(row):
@@ -13,25 +15,22 @@ def _unit(row):
     return v / np.linalg.norm(v)
 
 
-def _store(tmp_path: Path) -> VectorStore:
+def _store(tmp_path: Path, name: str = "fstore"):
     chunks = [
         Chunk("a::0", "TIC-001", "free plan limit", {"product": "API", "customer_tier": "free"}),
         Chunk("b::0", "TIC-002", "pro plan limit", {"product": "API", "customer_tier": "pro"}),
         Chunk("c::0", "TIC-003", "refund timing", {"product": "Billing", "customer_tier": "pro"}),
     ]
     vectors = np.vstack([_unit([1, 0, 0]), _unit([0.9, 0.1, 0]), _unit([0, 0, 1])])
-    return VectorStore(chunks, vectors)
+    return make_qdrant_store(tmp_path, chunks, vectors, name=name)
 
 
-def test_store_roundtrip_preserves_metadata(tmp_path: Path):
-    store = _store(tmp_path)
-    store.meta = StoreMeta("m", 3, "ticket", 500, 50, 3)
-    store.save(tmp_path)
-
-    loaded = VectorStore.load(tmp_path)
-    assert loaded.chunks[0].metadata["customer_tier"] == "free"
-    assert loaded.meta is not None
-    assert loaded.meta.embedding_model == "m"
+def test_store_meta_round_trips(tmp_path: Path):
+    store = _store(tmp_path, "meta1")
+    store2 = _store(tmp_path, "meta2")  # different collection, own meta
+    store2.close()
+    assert store.load_meta().embedding_model == "fake"
+    store.close()
 
 
 def test_search_orders_by_cosine(tmp_path: Path):
@@ -79,9 +78,13 @@ def test_filter_parse_rejects_malformed():
         MetaFilter.parse(["product="])
 
 
-def test_dimension_mismatch_names_the_real_cause(tmp_path: Path):
+def test_dimension_mismatch_is_rejected(tmp_path: Path):
     store = _store(tmp_path)
-    with pytest.raises(ValueError, match="different embedding model"):
+    # Qdrant's own embedded implementation raises this — a numpy shape error
+    # from its local matching engine, not a custom message of ours. The
+    # store was built with 3-dim vectors; querying with 2 must fail loudly
+    # rather than silently return a nonsense ranking.
+    with pytest.raises(ValueError):
         store.search(np.array([1.0, 0.0], dtype=np.float32), k=1)
 
 
@@ -93,6 +96,6 @@ def test_store_meta_rejects_model_swap():
 
 
 def test_empty_store_and_zero_k(tmp_path: Path):
-    empty = VectorStore([], np.zeros((0, 3), dtype=np.float32))
+    empty = make_qdrant_store(tmp_path, [], np.zeros((0, 3), dtype=np.float32), name="empty")
     assert empty.search(_unit([1, 0, 0]), k=5) == []
     assert _store(tmp_path).search(_unit([1, 0, 0]), k=0) == []

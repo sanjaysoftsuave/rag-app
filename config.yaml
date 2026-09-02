@@ -1,37 +1,48 @@
-docs_dir: data/docs
 tickets_dir: data/tickets
 store_dir: data/store
 
-# Each preset is a full retrieval configuration, not just a size. Presets A and
-# B vary chunk_size on the naive 'flat' strategy so the size effect is visible
-# in isolation; C and D change the strategy itself.
+# How text is windowed. Drop your files into tickets_dir — `.md`/`.txt` load as
+# documents cited by filename, `.pdf` loads as one citable source per page —
+# then build the index from the app's "Add documents" tab.
 #
-#   flat     one document, character windows — bleeds across ticket boundaries
-#   ticket   one chunk per ticket            — citation is always exact
-#   section  turns packed under a repeated header — self-describing fragments
-chunk_presets:
-  A:
-    strategy: flat
-    chunk_size: 500
-    overlap: 50
-  B:
-    strategy: flat
-    chunk_size: 1000
-    overlap: 100
-  C:
-    strategy: ticket
-    chunk_size: 2000
-    overlap: 200
-  D:
-    strategy: section
-    chunk_size: 700
-    overlap: 0
+# Every source is windowed on its own: a .md/.txt file as a whole, a PDF one
+# page at a time. Nothing is ever concatenated with anything else, so a chunk
+# can never contain text from two sources and a citation always names the one
+# place its text came from.
+#
+# chunk_size is CHARACTERS, not tokens, and the embedding model has its own
+# ceiling. Above it the tail of every chunk is silently dropped before it is
+# embedded — not a trade-off, just invisible text. Measured limits:
+#
+#   all-MiniLM-L6-v2   256 tokens  (~1000 chars)
+#   bge-small-en-v1.5  512 tokens  (~2000 chars)   <- active
+#   e5-small-v2        512 tokens  (~2000 chars)
+#
+# `python -m rag_app models` prints these. Stay under the active model's limit.
+chunking:
+  chunk_size: 500
+  overlap: 100
 
-default_preset: C
+# To compare several configurations side by side, replace the `chunking` block
+# above with a `chunk_presets` map plus `default_preset`, e.g.
+#
+#   chunk_presets:
+#     small: {chunk_size: 500,  overlap: 100}
+#     large: {chunk_size: 1000, overlap: 100}
+#   default_preset: small
+#
+# `chunks --all` and the UI's preset selector start working again with no code
+# change; each preset gets its own index directory.
 
-# Swap to BAAI/bge-small-en-v1.5 or intfloat/e5-small-v2 to compare families.
-# Prefixes are applied automatically per family — see embed.MODEL_REGISTRY.
-bi_encoder_model: sentence-transformers/all-MiniLM-L6-v2
+# bge-small is the same 384 dimensions and size class as all-MiniLM-L6-v2, with
+# twice the input window and stronger MTEB retrieval scores. It is asymmetric:
+# the QUERY needs an instruction prefix and passages stay bare. That prefix is
+# applied automatically from embed.MODEL_REGISTRY — getting it wrong degrades
+# retrieval with no error, which is exactly why the registry exists.
+#
+# Changing this requires a re-ingest: the store records which model built it
+# and refuses to serve queries from a different one.
+bi_encoder_model: BAAI/bge-small-en-v1.5
 cross_encoder_model: cross-encoder/ms-marco-MiniLM-L-6-v2
 
 retrieve_k: 10
@@ -42,47 +53,38 @@ rerank_n: 3
 # "the model considers this more relevant than not" instead of being an
 # arbitrary point on a raw logit axis.
 #
-# 0.20 is chosen from evidence, not taste. `eval --all --sweep` puts the
-# optimum band at 0.05-0.45 (0 false refusals, 4/4 correct refusals); above
-# 0.50 false refusals appear. Within that band the deciding evidence is query
-# shape: well-formed questions score >0.95, the out-of-corpus questions score
-# <0.05, but terse search-box queries ("refund timing", "webhook retries")
-# land around 0.25. A threshold of 0.20 sits below those and still far above
-# the unanswerable band.
-#
-# Re-run the sweep after swapping in a real corpus — this number is tuned on
-# 36 synthetic tickets and will NOT transfer.
+# 0.20 is a starting point measured on a different corpus, and it will NOT
+# transfer to yours. Tune it in the UI: drag score_threshold and watch which
+# questions flip between answered and refused. Too high and real answers get
+# refused; too low and the model is handed excerpts that do not contain the
+# answer and invited to improvise.
 rerank_score_scale: sigmoid
 score_threshold: 0.20
 
-# numpy = exact brute force, zero dependencies.
-# qdrant = real vector DB (embedded by default; set qdrant.url for a server).
-backend: numpy
-
-# dense  = bi-encoder cosine only (the week-1 baseline).
+# dense  = bi-encoder cosine only.
 # hybrid = dense + BM25 keyword search, fused by Reciprocal Rank Fusion.
-#          See hybrid.py. This is the ONE change `eval --all --compare-retrieval`
-#          measures — do not tune anything else while comparing modes, or the
-#          before/after number stops meaning anything.
+#          See hybrid.py for why RRF rather than a weighted score blend.
 #
-# Measured on this corpus (`eval --all --compare-retrieval`, hit-rate@3):
-#   A (flat/500)    dense 95% -> hybrid 91%   (-5%, 1 regressed, 1 still broken)
-#   B (flat/1000)   dense 91% -> hybrid 86%   (-5%, 1 regressed, 2 still broken)
-#   C (ticket/2000) dense 100% -> hybrid 100% (+0%, already saturated)
-#   D (section/700) dense 100% -> hybrid 100% (+0%, already saturated)
+# Dense finds "why do I keep getting cut off" when the text says "rate limit
+# exceeded" — meaning, no shared words. BM25 finds "ERR-4032" — an exact token
+# dense retrieval treats as just another point in embedding space. They fail in
+# complementary ways, which is the argument for fusing them.
 #
-# `dense` stays the default: hybrid helped nothing here and mildly hurt the
-# flat-chunked presets. Root cause on A/B is last week's chunking-bleed defect
-# — BM25 latches onto boilerplate/header vocabulary shared by boundary-bled
-# neighbour chunks and dilutes an already-correct dense pick via RRF. C/D never
-# had room to improve: retrieval was already at 95-100% hit-rate@3 before this
-# change. Hybrid mode is real and tested (tests/test_hybrid*.py) — worth
-# revisiting on a larger or keyword-heavier corpus, not this one.
+# `dense` is the default because hybrid earns its keep on keyword-heavy corpora
+# (error codes, part numbers, proper nouns) and costs a little precision on
+# prose. Switch it in the UI sidebar and compare on your own questions.
 retrieval:
   mode: dense
   rrf_k: 60       # RRF's rank-discount constant; 60 is the standard TREC value
   bm25_pool: 20   # BM25 candidates pulled into the fusion pool
 
+# Qdrant is the only vector store — no in-process numpy fallback.
+# url: null runs embedded (a local file, zero setup) — same brute-force search
+# under the hood, just via the real Qdrant API/persistence format.
+# Embedded mode accepts m/ef_construct/hnsw_ef below and silently ignores
+# them; they only take effect once you point url at a real server:
+#   docker run -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant
+# See qdrant_store.py's module docstring before quoting HNSW numbers.
 qdrant:
   url: null
   m: 16

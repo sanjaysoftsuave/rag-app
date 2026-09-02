@@ -8,7 +8,8 @@ import numpy as np
 from rag_app.chunking import Chunk
 from rag_app.config import RetrievalConfig
 from rag_app.pipeline import ask
-from rag_app.store import StoreMeta, VectorStore, store_path_for_preset
+from rag_app.qdrant_store import QdrantStore, qdrant_path_for_preset
+from rag_app.store import StoreMeta
 
 from conftest import FakeReranker, FixedEmbedder, make_config
 
@@ -19,9 +20,11 @@ def _seed(cfg, preset):
         Chunk("b::0", "TIC-KEYWORD", "this ticket literally contains ZQXK-7777", {}),
     ]
     vectors = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-    VectorStore(chunks, vectors, StoreMeta("fake", 2, "ticket", 100, 0, 2)).save(
-        store_path_for_preset(cfg.store_dir, preset)
-    )
+    meta = StoreMeta("fake", 2, "ticket", 100, 0, 2)
+    path = qdrant_path_for_preset(cfg.store_dir, preset)
+    store = QdrantStore(meta_dir=path, path=path)
+    store.build(chunks, vectors, meta)
+    store.close()
 
 
 def test_dense_mode_misses_the_keyword_only_match(tmp_path):

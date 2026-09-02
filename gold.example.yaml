@@ -1,0 +1,41 @@
+# Gold set — questions whose correct answers you already know.
+#
+# Copy to data/gold.yaml and rewrite for YOUR documents. There is no useful
+# default: every entry has to be checked by a human reading the source, which
+# is exactly what makes the resulting numbers worth anything.
+#
+#   question         what to ask
+#   must_contain     string(s) the ANSWER must contain (generation ground truth)
+#   expect_in_chunk  string(s) a RETRIEVED CHUNK must contain (retrieval ground
+#                    truth). Defaults to must_contain; set it separately when
+#                    the document phrases a fact differently from the answer.
+#   unanswerable     true = the corpus genuinely cannot answer this, and the
+#                    app MUST refuse. Include several — without them you cannot
+#                    tell a calibrated gate from one that never refuses.
+#   note             free text, for your own reference
+#
+# Relevance is matched on CONTENT, not document id, so this works on a corpus
+# of one file. Matching is case-insensitive substring.
+
+- question: How long is a password reset link valid for?
+  must_contain: "60 minutes"
+  note: single clean lookup
+
+- question: What are the steps to resolve a duplicate invoice?
+  must_contain:
+    - refund
+    - duplicate
+  note: several expected snippets, so recall@k is stricter than hit-rate@k
+
+- question: How many times is a failed webhook retried?
+  must_contain: "5"
+  expect_in_chunk: "retry"
+  note: the answer states a number the chunk phrases as prose
+
+- question: What is the price of the Enterprise plan?
+  unanswerable: true
+  note: pricing is never stated in the corpus
+
+- question: What is the weather today?
+  unanswerable: true
+  note: off-topic — the gate should refuse without calling the LLM

@@ -14,8 +14,9 @@ from rag_app.generate import (
     is_refusal,
 )
 from rag_app.pipeline import ask
+from rag_app.qdrant_store import QdrantStore, qdrant_path_for_preset
 from rag_app.rerank import apply_scale, rerank, sigmoid
-from rag_app.store import ScoredChunk, StoreMeta, VectorStore, store_path_for_preset
+from rag_app.store import ScoredChunk, StoreMeta
 
 from conftest import FakeReranker, FixedEmbedder, make_config
 
@@ -33,8 +34,11 @@ def _seed_store(cfg, preset="C", texts=(("TIC-001", "Free plan is 60 rpm"),)):
     chunks = [Chunk(f"{tid}::0", tid, text, {"ticket_id": tid}) for tid, text in texts]
     vectors = np.zeros((len(chunks), 2), dtype=np.float32)
     vectors[:, 0] = 1.0
-    store = VectorStore(chunks, vectors, StoreMeta("fake", 2, "ticket", 2000, 200, len(chunks)))
-    store.save(store_path_for_preset(cfg.store_dir, preset))
+    meta = StoreMeta("fake", 2, "ticket", 2000, 200, len(chunks))
+    path = qdrant_path_for_preset(cfg.store_dir, preset)
+    store = QdrantStore(meta_dir=path, path=path)
+    store.build(chunks, vectors, meta)
+    store.close()  # ask() reopens fresh via open_store(), same as real usage
 
 
 def make_config_with_store(tmp=None, **kw):
@@ -51,15 +55,12 @@ def make_config_with_store(tmp=None, **kw):
 
 
 def test_prompt_labels_blocks_with_the_id_it_asks_to_be_cited():
-    """Labelling blocks [1] while demanding [TIC-001] teaches the wrong format."""
+    """Labelling blocks [1] while demanding the real label teaches the wrong format."""
     messages = build_prompt("How many requests?", _contexts())
     user = messages[1]["content"]
     assert "[TIC-001]" in user
     assert "[TIC-002]" in user
     assert "[1]" not in user and "[2]" not in user
-    # Metadata is surfaced so the model can distinguish near-identical excerpts.
-    assert "customer_tier=free" in user
-    assert "customer_tier=pro" in user
 
 
 def test_prompt_does_not_leak_scores_into_context():
@@ -262,3 +263,23 @@ def test_unknown_checkpoint_infers_family_rather_than_assuming_symmetric():
     assert spec_for("some-org/my-e5-finetune").query_prefix == "query: "
     assert spec_for("some-org/bge-large-custom").query_prefix
     assert not spec_for("some-org/mystery-model").asymmetric
+
+
+def test_asymmetric_models_encode_queries_and_passages_differently():
+    """The whole reason `encode_queries` and `encode_documents` are separate.
+
+    Using the wrong one on BGE or E5 does not error — it just retrieves worse,
+    silently. A fake embedder that ignores the distinction would let that
+    regression through, so this asserts on the registry's own rules.
+    """
+    from rag_app.embed import spec_for
+
+    bge = spec_for("BAAI/bge-small-en-v1.5")
+    assert bge.asymmetric
+    assert bge.query_prefix and not bge.passage_prefix
+
+    e5 = spec_for("intfloat/e5-small-v2")
+    assert e5.query_prefix == "query: " and e5.passage_prefix == "passage: "
+
+    mini = spec_for("sentence-transformers/all-MiniLM-L6-v2")
+    assert not mini.asymmetric

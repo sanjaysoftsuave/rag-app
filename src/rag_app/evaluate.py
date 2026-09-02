@@ -1,642 +1,565 @@
-"""Retrieval + gate evaluation.
+"""Measurement: does retrieval find the right text, and does the answer use it?
 
-Runs without the LLM by default, so it costs nothing and can be run on every
-change. It answers four questions:
+WHY THIS LOOKS DIFFERENT FROM THE USUAL TEXTBOOK VERSION
+--------------------------------------------------------
+Retrieval metrics are normally defined over *documents*: hit-rate@k asks
+whether the relevant document id appeared in the top k. That works when a
+corpus is thousands of separate records. It is useless here, because a corpus
+of one PDF has exactly one document id — hit-rate would be 1.0 for every
+question including the nonsense ones, and would measure nothing at all.
 
-  1. hit@k   — did the correct ticket make it into the top-K at all?
-               If not, no amount of reranking or prompting can save the answer.
-  2. MRR     — how high did it rank? Separates "barely retrieved" from "top hit".
-  3. rerank lift — how much did the cross-encoder improve position over the
-               bi-encoder alone? This is the number that justifies its cost.
-  4. gate accuracy — does it refuse the things it should refuse, and answer the
-               things it should answer? A gate that refuses everything scores
-               100% on refusals and is useless.
+So relevance is defined by **content**, not by source id. A gold question names
+a snippet that must appear in a retrieved chunk. That works whether the corpus
+is one file or ten thousand, and it is checkable by a human reading the
+document rather than requiring pre-labelled record ids.
+
+THE METRICS
+-----------
+  hit-rate@k   fraction of questions where SOME expected snippet appeared in
+               the top-k retrieved chunks. "Did we find anything useful?"
+  recall@k     fraction of ALL expected snippets found across the top-k. With
+               one snippet per question this equals hit-rate; with several it
+               is stricter, and it is the honest number when a question needs
+               two facts to be answered fully.
+  MRR          mean of 1/rank of the first chunk containing an expected
+               snippet. Rewards ranking the right chunk first, not merely
+               somewhere in the funnel.
+  rerank lift  hit-rate after reranking (top-N) minus hit-rate before it
+               (top-K restricted to N). The number that justifies the
+               cross-encoder's cost, or fails to.
+  refusal accuracy / false refusals
+               Read these together. A gate that refuses everything scores
+               100% on refusals and is worthless.
+
+RETRIEVAL vs GENERATION FAILURES
+--------------------------------
+`label_failures()` sorts every answerable question into exactly one bucket,
+using `ask()` itself rather than re-deriving gate logic, so a label reflects
+what the live app actually did:
+
+  retrieval    the expected text never reached the final context. No LLM,
+               however good, could have answered. Evidence distinguishes
+               "never retrieved at all" (bi-encoder's fault) from "retrieved
+               then reranked out" (cross-encoder's fault).
+  generation   the text WAS in context and the answer still missed. Includes
+               the gate refusing despite a passing chunk — a false refusal is
+               a generation-side failure, because retrieval did its job.
+  pass         answered, and the answer contained what it should.
+  unconfirmed  text reached context but --generate was not passed, so nothing
+               checked what the LLM did with it.
+
+The boundary is membership in the final `rerank_n` context, not "rank 1". A
+chunk at rank 3 of 3 still reached the model.
 """
 
 from __future__ import annotations
 
-from collections import Counter
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
-from rag_app.bm25 import BM25Index
+import yaml
+
 from rag_app.config import AppConfig, load_config
-from rag_app.embed import Embedder
-from rag_app.filters import MetaFilter
-from rag_app.hybrid import hybrid_retrieve
 from rag_app.pipeline import ask
-from rag_app.rerank import CrossEncoderReranker, rerank
-from rag_app.retrieve import retrieve
-from rag_app.store import SearchBackend
+from rag_app.store import ScoredChunk
+
+GOLD_FILENAME = "gold.yaml"
+
+
+# ---------------------------------------------------------------------------
+# The gold set
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class GoldQuestion:
+    """One question with a known-correct outcome.
+
+    `expect_in_chunk` is what must appear in a RETRIEVED CHUNK — the retrieval
+    ground truth. `must_contain` is what must appear in the ANSWER — the
+    generation ground truth. They are usually the same string, so
+    `expect_in_chunk` defaults to `must_contain`, but they come apart when the
+    document phrases a fact differently from how an answer would state it.
+
+    `unanswerable=True` marks a question the corpus genuinely cannot answer.
+    These are not padding: without them you cannot tell a well-calibrated gate
+    from one that never refuses anything.
+    """
+
     question: str
-    ticket_id: str | None  # None = deliberately unanswerable
-    must_contain: str = ""
+    must_contain: list[str] = field(default_factory=list)
+    expect_in_chunk: list[str] = field(default_factory=list)
+    unanswerable: bool = False
     note: str = ""
 
     @property
     def answerable(self) -> bool:
-        return self.ticket_id is not None
+        return not self.unanswerable
+
+    @property
+    def snippets(self) -> list[str]:
+        return self.expect_in_chunk or self.must_contain
+
+    def found_in(self, text: str) -> list[str]:
+        """Which expected snippets appear in `text`, case-insensitively."""
+        low = text.lower()
+        return [s for s in self.snippets if s.lower() in low]
 
 
-# The three rate-limit questions are the point of this set: near-identical in
-# embedding space, different correct answers. A bi-encoder alone confuses them.
-GOLD: list[GoldQuestion] = [
-    GoldQuestion("What is the API rate limit on the Free plan?", "TIC-1001", "60"),
-    GoldQuestion("How many requests per minute does the Pro plan allow?", "TIC-1002", "600"),
-    GoldQuestion("What rate limit do Enterprise accounts get by default?", "TIC-1003", "6000"),
-    GoldQuestion("How long does a refund to a credit card take?", "TIC-1004", "5"),
-    GoldQuestion("How long does a bank transfer refund take?", "TIC-1005", "15"),
-    GoldQuestion("Can a VAT number be added to an invoice after it was issued?", "TIC-1006", "credit note"),
-    GoldQuestion("How long is a password reset link valid for?", "TIC-1014", "60 minutes"),
-    GoldQuestion("How many MFA backup codes are issued?", "TIC-1015", "10"),
-    GoldQuestion("How many times does a failed webhook get retried?", "TIC-1010", "5"),
-    GoldQuestion("Is offset pagination supported?", "TIC-1012", "not supported"),
-    GoldQuestion("How many days of data does mobile offline mode cache?", "TIC-1023", "7 days"),
-    GoldQuestion("When is an account suspended after a failed payment?", "TIC-1032", "14"),
-    GoldQuestion("How long are audit logs retained on Enterprise?", "TIC-1031", "2 years"),
-    GoldQuestion("Is there an on-premise or self-hosted version?", "TIC-1036", "cloud-only"),
-    GoldQuestion("What is the gateway timeout for synchronous requests?", "TIC-1027", "30 second"),
-    GoldQuestion("What permission is needed to install the Slack app?", "TIC-1019", "admin"),
-    # Terse, keyword-style queries — what people actually type into a help-centre
-    # search box. Unambiguous, but the cross-encoder scores them far lower than
-    # a well-formed question, so these are where the gate threshold actually
-    # bites. Without them the sweep is flat and tells you nothing.
-    GoldQuestion("password reset expired", "TIC-1014", "60 minutes", note="terse"),
-    GoldQuestion("webhook retries", "TIC-1010", "5", note="terse"),
-    GoldQuestion("offline cache days", "TIC-1023", "7 days", note="terse"),
-    GoldQuestion("slack install failed", "TIC-1019", "admin", note="terse"),
-    GoldQuestion("429 free plan", "TIC-1001", "60", note="terse"),
-    GoldQuestion("duplicate charge", "TIC-1007", "retr", note="terse"),
-    # Deliberately absent from the corpus — the gate must refuse these.
-    GoldQuestion("Are you HIPAA compliant and will you sign a BAA?", None,
-                 note="compliance topic never discussed in any ticket"),
-    GoldQuestion("What are your phone support opening hours?", None,
-                 note="support hours never stated"),
-    GoldQuestion("How much does the Pro plan cost per month?", None,
-                 note="no ticket quotes a price"),
-    GoldQuestion("What is your uptime SLA percentage?", None,
-                 note="SLA never mentioned"),
-]
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value]
+
+
+def parse_gold(raw: Any) -> list[GoldQuestion]:
+    """Build gold questions from parsed YAML/JSON, with useful errors.
+
+    A malformed gold set should say which entry is wrong. Silently skipping a
+    bad entry would quietly shrink the denominator of every metric.
+    """
+    if not isinstance(raw, list):
+        raise ValueError("The gold set must be a list of question entries.")
+    questions: list[GoldQuestion] = []
+    for i, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Gold entry {i} is not a mapping: {entry!r}")
+        text = entry.get("question")
+        if not text:
+            raise ValueError(f"Gold entry {i} has no 'question'.")
+        unanswerable = bool(entry.get("unanswerable", False))
+        must = _as_list(entry.get("must_contain"))
+        expect = _as_list(entry.get("expect_in_chunk"))
+        if not unanswerable and not (must or expect):
+            raise ValueError(
+                f"Gold entry {i} ({text!r}) is answerable but names nothing to look "
+                f"for. Add 'must_contain', or mark it 'unanswerable: true'."
+            )
+        questions.append(
+            GoldQuestion(
+                question=str(text),
+                must_contain=must,
+                expect_in_chunk=expect,
+                unanswerable=unanswerable,
+                note=str(entry.get("note", "")),
+            )
+        )
+    return questions
+
+
+def gold_path(cfg: AppConfig) -> Path:
+    return cfg.tickets_dir.parent / GOLD_FILENAME
+
+
+def load_gold(cfg: AppConfig | None = None, path: Path | None = None) -> list[GoldQuestion]:
+    """Read the gold set, or explain how to create one."""
+    cfg = cfg or load_config()
+    target = path or gold_path(cfg)
+    if not target.exists():
+        raise FileNotFoundError(
+            f"No gold set at {target}. Metrics need questions whose correct answers "
+            f"you already know — write them for YOUR documents; there is no default. "
+            f"See gold.example.yaml at the repo root for the format."
+        )
+    raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+    return parse_gold(raw)
+
+
+def write_gold(questions: list[GoldQuestion], path: Path) -> None:
+    payload = []
+    for q in questions:
+        entry: dict[str, Any] = {"question": q.question}
+        if q.unanswerable:
+            entry["unanswerable"] = True
+        if q.must_contain:
+            entry["must_contain"] = q.must_contain
+        if q.expect_in_chunk:
+            entry["expect_in_chunk"] = q.expect_in_chunk
+        if q.note:
+            entry["note"] = q.note
+        payload.append(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Per-question result
+# ---------------------------------------------------------------------------
+
+
+def _first_hit_rank(gold: GoldQuestion, items: list[ScoredChunk]) -> int | None:
+    for rank, item in enumerate(items, start=1):
+        if gold.found_in(item.chunk.text):
+            return rank
+    return None
+
+
+def _snippets_found(gold: GoldQuestion, items: list[ScoredChunk]) -> set[str]:
+    found: set[str] = set()
+    for item in items:
+        found.update(gold.found_in(item.chunk.text))
+    return found
 
 
 @dataclass
 class QuestionResult:
     gold: GoldQuestion
-    retrieved_rank: int | None  # 1-based position after bi-encoder, None = miss
-    reranked_rank: int | None  # 1-based position after cross-encoder
+    retrieved_rank: int | None    # 1-based rank of the first hit after retrieval
+    reranked_rank: int | None     # ... after reranking, within the final context
+    retrieved_found: set[str]     # which expected snippets appeared in top-k
+    reranked_found: set[str]      # ... in the final top-n
     best_score: float
-    gated_out: bool
-    top_source: str = ""
+    used_llm: bool
+    refused: bool
+    gate: str
+    answer_text: str = ""
 
     @property
-    def hit_retrieval(self) -> bool:
+    def hit(self) -> bool:
         return self.retrieved_rank is not None
 
     @property
-    def hit_rerank(self) -> bool:
+    def hit_after_rerank(self) -> bool:
         return self.reranked_rank is not None
 
     @property
-    def gate_correct(self) -> bool:
-        # Answerable questions must pass the gate AND surface the right ticket
-        # at rank 1. Passing the gate with the wrong ticket is a worse failure
-        # than refusing, because it produces a confident wrong answer.
-        if self.gold.answerable:
-            return not self.gated_out and self.reranked_rank == 1
-        return self.gated_out
+    def reciprocal_rank(self) -> float:
+        return 1.0 / self.retrieved_rank if self.retrieved_rank else 0.0
+
+    @property
+    def answer_ok(self) -> bool:
+        """Did the answer contain every string it was supposed to?"""
+        if not self.gold.must_contain:
+            return not self.refused
+        low = self.answer_text.lower()
+        return all(s.lower() in low for s in self.gold.must_contain)
 
 
 @dataclass
 class EvalReport:
     preset: str
-    strategy: str
-    backend: str
-    embedding_model: str
-    results: list[QuestionResult] = field(default_factory=list)
+    k: int
+    n: int
+    results: list[QuestionResult]
+    generated: bool = False
 
-    def _answerable(self) -> list[QuestionResult]:
+    @property
+    def answerable(self) -> list[QuestionResult]:
         return [r for r in self.results if r.gold.answerable]
 
-    def _unanswerable(self) -> list[QuestionResult]:
+    @property
+    def unanswerable(self) -> list[QuestionResult]:
         return [r for r in self.results if not r.gold.answerable]
 
-    @property
-    def hit_at_k(self) -> float:
-        rows = self._answerable()
-        return sum(r.hit_retrieval for r in rows) / len(rows) if rows else 0.0
+    def _frac(self, values: list[bool]) -> float:
+        return (sum(values) / len(values)) if values else 0.0
 
     @property
-    def mrr_retrieval(self) -> float:
-        rows = self._answerable()
-        if not rows:
-            return 0.0
-        return sum(1.0 / r.retrieved_rank if r.retrieved_rank else 0.0 for r in rows) / len(rows)
+    def hit_rate(self) -> float:
+        """Did SOME expected snippet reach the top-k?"""
+        return self._frac([r.hit for r in self.answerable])
 
     @property
-    def mrr_rerank(self) -> float:
-        rows = self._answerable()
-        if not rows:
-            return 0.0
-        return sum(1.0 / r.reranked_rank if r.reranked_rank else 0.0 for r in rows) / len(rows)
+    def recall_at_k(self) -> float:
+        """Of ALL expected snippets, how many reached the top-k?
+
+        Distinct from hit-rate only when a question expects several snippets —
+        which is exactly the case where hit-rate flatters a partial retrieval.
+        """
+        total = sum(len(r.gold.snippets) for r in self.answerable)
+        found = sum(len(r.retrieved_found) for r in self.answerable)
+        return (found / total) if total else 0.0
 
     @property
-    def top1_retrieval(self) -> float:
-        rows = self._answerable()
-        return sum(r.retrieved_rank == 1 for r in rows) / len(rows) if rows else 0.0
+    def recall_at_n(self) -> float:
+        total = sum(len(r.gold.snippets) for r in self.answerable)
+        found = sum(len(r.reranked_found) for r in self.answerable)
+        return (found / total) if total else 0.0
 
     @property
-    def top1_rerank(self) -> float:
-        rows = self._answerable()
-        return sum(r.reranked_rank == 1 for r in rows) / len(rows) if rows else 0.0
+    def mrr(self) -> float:
+        rows = self.answerable
+        return (sum(r.reciprocal_rank for r in rows) / len(rows)) if rows else 0.0
+
+    @property
+    def hit_rate_after_rerank(self) -> float:
+        return self._frac([r.hit_after_rerank for r in self.answerable])
+
+    @property
+    def rerank_lift(self) -> float:
+        """Hit-rate in the final N vs the retriever's own top-N.
+
+        Compares like with like: both are 'did the right text make it into N
+        slots', one chosen by the bi-encoder and one by the cross-encoder. The
+        difference is what the reranker bought.
+        """
+        baseline = self._frac(
+            [r.retrieved_rank is not None and r.retrieved_rank <= self.n
+             for r in self.answerable]
+        )
+        return self.hit_rate_after_rerank - baseline
 
     @property
     def refusal_accuracy(self) -> float:
-        rows = self._unanswerable()
-        return sum(r.gated_out for r in rows) / len(rows) if rows else 0.0
+        return self._frac([r.refused for r in self.unanswerable])
 
     @property
-    def false_refusals(self) -> int:
-        """Right ticket at rank 1, and the gate threw it away anyway.
-
-        Deliberately NOT "every answerable question that got gated out". When
-        the top hit is the *wrong* ticket, refusing is correct behaviour — that
-        is the gate doing its job, and counting it as a failure would push you
-        to lower the threshold in exactly the wrong direction. Counted
-        separately as `saved_by_gate`.
-        """
-        return sum(1 for r in self._answerable() if r.gated_out and r.reranked_rank == 1)
+    def false_refusals(self) -> list[QuestionResult]:
+        """Answerable questions the app refused. Read WITH refusal accuracy."""
+        return [r for r in self.answerable if r.refused]
 
     @property
-    def saved_by_gate(self) -> int:
-        """Wrong top-1, correctly refused instead of answering confidently wrong."""
-        return sum(1 for r in self._answerable() if r.gated_out and r.reranked_rank != 1)
+    def answer_accuracy(self) -> float:
+        return self._frac([r.answer_ok for r in self.answerable])
 
     def describe(self) -> str:
         lines = [
-            f"Preset {self.preset} (strategy={self.strategy}, backend={self.backend})",
-            f"  embedding model : {self.embedding_model}",
-            f"  hit@K           : {self.hit_at_k:.0%}  (gold ticket anywhere in top-K)",
-            f"  top-1 bi-encoder: {self.top1_retrieval:.0%}",
-            f"  top-1 reranked  : {self.top1_rerank:.0%}   <- rerank lift: "
-            f"{self.top1_rerank - self.top1_retrieval:+.0%}",
-            f"  MRR bi-encoder  : {self.mrr_retrieval:.3f}",
-            f"  MRR reranked    : {self.mrr_rerank:.3f}",
-            f"  refusal accuracy: {self.refusal_accuracy:.0%}  "
-            f"({len(self._unanswerable())} unanswerable questions)",
-            f"  false refusals  : {self.false_refusals} "
-            f"(right ticket at rank 1, gated out anyway)",
-            f"  saved by gate   : {self.saved_by_gate} "
-            f"(wrong top-1, correctly refused instead of answering wrongly)",
+            f"Preset {self.preset}  (K={self.k} -> N={self.n}, "
+            f"{len(self.answerable)} answerable + {len(self.unanswerable)} unanswerable)",
+            "",
+            f"  hit-rate@{self.k}      {self.hit_rate:6.1%}   some expected text reached the funnel",
+            f"  recall@{self.k}        {self.recall_at_k:6.1%}   of all expected snippets",
+            f"  MRR              {self.mrr:6.3f}   1/rank of the first hit",
+            f"  hit-rate@{self.n}       {self.hit_rate_after_rerank:6.1%}   survived reranking into context",
+            f"  recall@{self.n}         {self.recall_at_n:6.1%}",
+            f"  rerank lift      {self.rerank_lift:+6.1%}   vs the retriever's own top-{self.n}",
+            f"  refusal accuracy {self.refusal_accuracy:6.1%}   of {len(self.unanswerable)} unanswerable",
+            f"  false refusals   {len(self.false_refusals):6d}   answerable questions refused",
         ]
-        misses = [r for r in self._answerable() if r.reranked_rank != 1]
-        if misses:
-            lines.append("  misses:")
-            for r in misses:
-                where = f"rank {r.reranked_rank}" if r.reranked_rank else "not retrieved"
-                lines.append(
-                    f"    - {r.gold.ticket_id} {where} (got [{r.top_source}]) "
-                    f"| {r.gold.question}"
-                )
+        if self.generated:
+            lines.append(
+                f"  answer accuracy  {self.answer_accuracy:6.1%}   answers containing what they should"
+            )
+        else:
+            lines.append("  answer accuracy     n/a   (retrieval only; pass --generate)")
+        if self.false_refusals:
+            lines.append("\n  Refused but answerable:")
+            for r in self.false_refusals:
+                lines.append(f"    - {r.gold.question}   (best score {r.best_score:.4f})")
         return "\n".join(lines)
 
 
-def _rank_of(items, ticket_id: str) -> int | None:
-    for i, item in enumerate(items, start=1):
-        if item.chunk.source == ticket_id:
-            return i
-    return None
+def _skip_generation(question, contexts, cfg) -> str:
+    """Stand-in generate_fn: no network, but the real gate still runs, so
+    `gate` and `used_llm` stay meaningful without spending anything."""
+    return "(generation skipped)"
 
 
 def evaluate(
-    store: SearchBackend,
-    cfg: AppConfig,
-    preset: str,
+    gold: list[GoldQuestion],
+    preset: str | None = None,
+    config: AppConfig | None = None,
     *,
-    embedder: Embedder,
-    reranker: CrossEncoderReranker,
-    gold: list[GoldQuestion] | None = None,
-    flt: MetaFilter | None = None,
+    embedder=None,
+    reranker=None,
+    store=None,
+    use_llm: bool = False,
+    generate_fn=None,
 ) -> EvalReport:
-    questions = gold or GOLD
-    strategy = cfg.chunk_presets[preset].strategy
-    report = EvalReport(
-        preset=preset,
-        strategy=strategy,
-        backend=cfg.backend,
-        embedding_model=cfg.bi_encoder_model,
-    )
+    """Run every gold question through the real `ask()` and score the results."""
+    cfg = config or load_config()
+    name = preset or cfg.default_preset
+    results: list[QuestionResult] = []
 
-    for item in questions:
-        qvec = embedder.encode_queries([item.question])[0]
-        retrieved = retrieve(store, qvec, k=cfg.retrieve_k, flt=flt)
-        reranked = rerank(
-            item.question,
-            retrieved,
-            n=cfg.rerank_n,
-            scorer=reranker,
-            scale=cfg.rerank_score_scale,
+    for question in gold:
+        answer = ask(
+            question.question,
+            preset=name,
+            config=cfg,
+            embedder=embedder,
+            reranker=reranker,
+            store=store,
+            generate_fn=generate_fn if use_llm else _skip_generation,
         )
-        best = reranked[0].score if reranked else float("-inf")
-        report.results.append(
+        results.append(
             QuestionResult(
-                gold=item,
-                retrieved_rank=_rank_of(retrieved, item.ticket_id) if item.ticket_id else None,
-                reranked_rank=_rank_of(reranked, item.ticket_id) if item.ticket_id else None,
-                best_score=best,
-                gated_out=(not reranked) or best < cfg.score_threshold,
-                top_source=reranked[0].chunk.source if reranked else "",
+                gold=question,
+                retrieved_rank=_first_hit_rank(question, answer.retrieved),
+                reranked_rank=_first_hit_rank(question, answer.reranked),
+                retrieved_found=_snippets_found(question, answer.retrieved),
+                reranked_found=_snippets_found(question, answer.reranked),
+                best_score=answer.best_score,
+                used_llm=answer.used_llm,
+                refused=answer.refused,
+                gate=answer.gate,
+                answer_text=answer.text if use_llm else "",
             )
         )
-    return report
 
-
-def sweep_threshold(
-    report: EvalReport, thresholds: list[float] | None = None
-) -> list[tuple[float, int, int, float]]:
-    """Replay the gate at different thresholds without re-running retrieval.
-
-    The gate has exactly one tuning knob and two failure modes that pull in
-    opposite directions:
-
-      threshold too HIGH -> false refusals: the answer was retrieved correctly
-                            and thrown away anyway.
-      threshold too LOW  -> the "I don't know" guarantee weakens and the model
-                            gets handed weak context it will happily write from.
-
-    Scores are already recorded per question, so this is pure arithmetic — which
-    means a threshold can be chosen from evidence instead of taste.
-
-    Returns (threshold, false_refusals, correct_refusals, f1)
-    """
-    grid = thresholds or [i / 20 for i in range(1, 20)]
-    answerable = [r for r in report.results if r.gold.answerable]
-    unanswerable = [r for r in report.results if not r.gold.answerable]
-
-    rows = []
-    for t in grid:
-        # An answerable question is served only if it passes the gate AND the
-        # right ticket is at rank 1; passing with the wrong ticket is worse
-        # than refusing, because it yields a confident wrong answer.
-        served = sum(1 for r in answerable if r.best_score >= t and r.reranked_rank == 1)
-        false_refusals = sum(
-            1 for r in answerable if r.best_score < t and r.reranked_rank == 1
-        )
-        correct_refusals = sum(1 for r in unanswerable if r.best_score < t)
-        leaked = len(unanswerable) - correct_refusals
-
-        precision = served / (served + leaked) if (served + leaked) else 0.0
-        recall = served / len(answerable) if answerable else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-        rows.append((t, false_refusals, correct_refusals, f1))
-    return rows
-
-
-def format_sweep(report: EvalReport) -> str:
-    rows = sweep_threshold(report)
-    n_unanswerable = len([r for r in report.results if not r.gold.answerable])
-    lines = [
-        f"Gate threshold sweep — preset {report.preset} ({report.strategy})",
-        f"{'thresh':<9}{'false refusals':<17}{'correct refusals':<19}{'F1'}",
-        "-" * 52,
-    ]
-    best = max(rows, key=lambda r: r[3])
-    for t, false_ref, correct_ref, f1 in rows:
-        marker = "  <-- best F1" if (t, false_ref, correct_ref, f1) == best else ""
-        lines.append(
-            f"{t:<9.2f}{false_ref:<17}{correct_ref}/{n_unanswerable:<16}{f1:.3f}{marker}"
-        )
-    return "\n".join(lines)
+    return EvalReport(
+        preset=name, k=cfg.retrieve_k, n=cfg.rerank_n, results=results, generated=use_llm
+    )
 
 
 # ---------------------------------------------------------------------------
-# Failure separation — "wrong document fetched" vs "right document, wrong
-# answer". These are different bugs with different fixes: no amount of LLM
-# quality fixes a retrieval failure, and no amount of retrieval tuning fixes a
-# model that had the right excerpt and still answered badly.
+# Failure labelling
 # ---------------------------------------------------------------------------
 
 FAILURE_BUCKETS = ("retrieval", "generation", "pass", "unconfirmed")
 
 
-def _skip_generation(question, contexts, cfg) -> str:
-    """Stand-in generate_fn for retrieval-only labeling — never touches the
-    network, but still lets the real score gate run, so `used_llm`/`gate`
-    stay meaningful even without calling the LLM."""
-    return "(generation skipped — labeling retrieval only; rerun with --generate to check the answer)"
-
-
 @dataclass
 class FailureLabel:
     gold: GoldQuestion
-    retrieved_rank: int | None
-    reranked_rank: int | None
-    bucket: str  # one of FAILURE_BUCKETS
+    bucket: str
     evidence: str
-    answer_text: str = ""
-    gate: str = ""
 
-    def describe(self) -> str:
-        lines = [f"[{self.bucket.upper()}] {self.gold.question!r}  (expects {self.gold.ticket_id})"]
-        lines.append(f"    {self.evidence}")
-        if self.answer_text:
-            preview = self.answer_text.replace("\n", " ")[:160]
-            lines.append(f"    answer: {preview}")
-        return "\n".join(lines)
+    @property
+    def failed(self) -> bool:
+        return self.bucket in ("retrieval", "generation")
 
 
 @dataclass
 class FailureReport:
     preset: str
-    generated: bool  # whether --generate actually called the LLM
-    labels: list[FailureLabel] = field(default_factory=list)
+    labels: list[FailureLabel]
+    generated: bool = False
 
-    def counts(self) -> dict[str, int]:
-        return dict(Counter(label.bucket for label in self.labels))
+    def of(self, bucket: str) -> list[FailureLabel]:
+        return [x for x in self.labels if x.bucket == bucket]
 
-    def describe(self, *, show_pass: bool = False) -> str:
-        counts = self.counts()
-        mode = "retrieval + generation checked" if self.generated else "retrieval only — pass --generate to confirm generation failures"
+    def describe(self, show_pass: bool = False) -> str:
+        counts = {b: len(self.of(b)) for b in FAILURE_BUCKETS}
         lines = [
-            f"Failure labels — preset {self.preset} ({mode})",
-            f"  retrieval failures : {counts.get('retrieval', 0):>3}  (wrong document fetched — LLM never had a chance)",
+            f"Preset {self.preset}: "
+            + "  ".join(f"{b}={counts[b]}" for b in FAILURE_BUCKETS),
+            "",
+            "  retrieval   = the text never reached the LLM's context. No model could have answered.",
+            "  generation  = the text WAS in context and the answer still missed.",
         ]
-        if self.generated:
-            lines.append(f"  generation failures : {counts.get('generation', 0):>3}  (right document, wrong answer)")
-            lines.append(f"  pass                : {counts.get('pass', 0):>3}")
-        else:
+        if not self.generated:
             lines.append(
-                f"  unconfirmed         : {counts.get('unconfirmed', 0):>3}  "
-                f"(correct doc reached the context; whether the answer used it is unchecked)"
+                "  unconfirmed = reached context, but --generate was not passed, so "
+                "nothing checked the answer."
             )
         lines.append("")
-        for label in self.labels:
-            if show_pass or label.bucket != "pass":
-                lines.append(label.describe())
-                lines.append("")
+        for bucket in ("retrieval", "generation", "unconfirmed", "pass"):
+            rows = self.of(bucket)
+            if not rows or (bucket == "pass" and not show_pass):
+                continue
+            lines.append(f"  [{bucket}]")
+            for row in rows:
+                lines.append(f"    - {row.gold.question}")
+                lines.append(f"        {row.evidence}")
+            lines.append("")
         return "\n".join(lines).rstrip()
 
 
 def label_failures(
-    store: SearchBackend,
-    cfg: AppConfig,
-    preset: str,
+    gold: list[GoldQuestion],
+    preset: str | None = None,
+    config: AppConfig | None = None,
     *,
-    embedder: Embedder,
-    reranker: CrossEncoderReranker,
-    gold: list[GoldQuestion] | None = None,
-    generate_fn=None,
+    embedder=None,
+    reranker=None,
+    store=None,
     use_llm: bool = False,
-    bm25: BM25Index | None = None,
-    flt: MetaFilter | None = None,
+    generate_fn=None,
 ) -> FailureReport:
-    """Run every answerable gold question through the real pipeline and sort
-    the result into a bucket, with the evidence that justifies it.
+    """Sort each answerable question into exactly one bucket.
 
-    Reuses `ask()` end to end rather than re-deriving gate logic, so a
-    labeled failure reflects exactly what the live app would have done —
-    including the score gate and refusal detection, both of which can turn a
-    "document was there" case into a wrong answer just as easily as the LLM
-    misreading the excerpt can.
-
-    `use_llm=False` (default) costs nothing: it can only prove bucket
-    "retrieval" (the document never reached the context) or mark a question
-    "unconfirmed" (it reached the context, but nobody checked what happened
-    next). `use_llm=True` spends one real LLM call per unconfirmed question to
-    resolve it into "pass" or "generation" using `GoldQuestion.must_contain`.
+    Calls `ask()` rather than reimplementing the gate, so the label always
+    describes what the live app did — the two cannot drift apart.
     """
-    questions = [g for g in (gold or GOLD) if g.answerable]
-    report = FailureReport(preset=preset, generated=use_llm)
-    gen = generate_fn if use_llm else _skip_generation
+    cfg = config or load_config()
+    name = preset or cfg.default_preset
+    labels: list[FailureLabel] = []
 
-    for item in questions:
+    for question in [g for g in gold if g.answerable]:
         answer = ask(
-            item.question,
-            preset=preset,
+            question.question,
+            preset=name,
             config=cfg,
             embedder=embedder,
             reranker=reranker,
             store=store,
-            generate_fn=gen,
-            flt=flt,
-            bm25=bm25,
+            generate_fn=generate_fn if use_llm else _skip_generation,
         )
-        retrieved_rank = _rank_of(answer.retrieved, item.ticket_id)
-        reranked_rank = _rank_of(answer.reranked, item.ticket_id)
+        retrieved_rank = _first_hit_rank(question, answer.retrieved)
+        context_rank = _first_hit_rank(question, answer.reranked)
 
-        if reranked_rank is None:
+        if context_rank is None:
+            # Which stage lost it? Different fixes: widen retrieve_k / change
+            # the embedder, versus change the reranker or rerank_n.
             if retrieved_rank is None:
-                evidence = "never entered the retrieved candidate set at all — the retriever's fault"
+                evidence = (
+                    f"never retrieved — no chunk in the top {cfg.retrieve_k} contained "
+                    f"the expected text (bi-encoder did not find it)"
+                )
             else:
                 evidence = (
-                    f"retrieved at rank {retrieved_rank}, but reranked OUT of the top "
-                    f"{cfg.rerank_n} shown to the LLM — the cross-encoder's fault, not the retriever's"
+                    f"retrieved at rank {retrieved_rank} but reranked out of the top "
+                    f"{cfg.rerank_n} (cross-encoder demoted it)"
                 )
-            report.labels.append(FailureLabel(
-                gold=item, retrieved_rank=retrieved_rank, reranked_rank=None,
-                bucket="retrieval", evidence=evidence, gate=answer.gate,
-            ))
-            continue
-
-        if not use_llm:
-            report.labels.append(FailureLabel(
-                gold=item, retrieved_rank=retrieved_rank, reranked_rank=reranked_rank,
-                bucket="unconfirmed",
-                evidence=(
-                    f"correct ticket WAS in context at rank {reranked_rank}/{cfg.rerank_n} — "
-                    f"rerun with --generate to check whether the answer actually used it"
-                ),
-                gate=answer.gate,
-            ))
-            continue
-
-        if not answer.used_llm:
-            report.labels.append(FailureLabel(
-                gold=item, retrieved_rank=retrieved_rank, reranked_rank=reranked_rank,
-                bucket="generation",
-                evidence=(
-                    f"correct ticket WAS in context at rank {reranked_rank}, but the score gate "
-                    f"refused anyway (best_score={answer.best_score:.3f} < threshold {cfg.score_threshold}) "
-                    f"— retrieval did its job, the gate is what threw the answer away"
-                ),
-                answer_text=answer.text, gate=answer.gate,
-            ))
+            labels.append(FailureLabel(question, "retrieval", evidence))
             continue
 
         if answer.refused:
-            report.labels.append(FailureLabel(
-                gold=item, retrieved_rank=retrieved_rank, reranked_rank=reranked_rank,
-                bucket="generation",
-                evidence=(
-                    f"correct ticket was in context at rank {reranked_rank}, but the model "
-                    f"refused to answer despite it being right there"
-                ),
-                answer_text=answer.text, gate=answer.gate,
-            ))
+            # Retrieval did its job; the refusal is a generation-side failure.
+            if not answer.used_llm:
+                evidence = (
+                    f"the right text was in context at rank {context_rank}, but the "
+                    f"score gate refused: best score {answer.best_score:.4f} < "
+                    f"threshold {cfg.score_threshold}. A false refusal."
+                )
+            else:
+                evidence = (
+                    f"the right text was in context at rank {context_rank}, the LLM was "
+                    f"called, and it declined to answer."
+                )
+            labels.append(FailureLabel(question, "generation", evidence))
             continue
 
-        if item.must_contain and item.must_contain.lower() not in answer.text.lower():
-            report.labels.append(FailureLabel(
-                gold=item, retrieved_rank=retrieved_rank, reranked_rank=reranked_rank,
-                bucket="generation",
-                evidence=(
-                    f"correct ticket was in context at rank {reranked_rank}, but the answer does "
-                    f"not mention the expected content {item.must_contain!r} — the model had it "
-                    f"and still got it wrong"
-                ),
-                answer_text=answer.text, gate=answer.gate,
-            ))
+        if not use_llm:
+            labels.append(
+                FailureLabel(
+                    question,
+                    "unconfirmed",
+                    f"reached context at rank {context_rank}; pass --generate to check "
+                    f"what the answer did with it",
+                )
+            )
             continue
 
-        report.labels.append(FailureLabel(
-            gold=item, retrieved_rank=retrieved_rank, reranked_rank=reranked_rank,
-            bucket="pass",
-            evidence=f"correct ticket at rank {reranked_rank}, answer used it correctly",
-            answer_text=answer.text, gate=answer.gate,
-        ))
-
-    return report
-
-
-# ---------------------------------------------------------------------------
-# Dense vs hybrid — the ONE-change, before/after retrieval comparison.
-# ---------------------------------------------------------------------------
-
-
-def _hit_at_k(results: list, ticket_id: str, k: int) -> tuple[bool, int | None]:
-    for i, item in enumerate(results[:k], start=1):
-        if item.chunk.source == ticket_id:
-            return True, i
-    return False, None
-
-
-@dataclass
-class RetrievalCompareRow:
-    gold: GoldQuestion
-    dense_hit: bool
-    hybrid_hit: bool
-    dense_rank: int | None
-    hybrid_rank: int | None
-
-    @property
-    def outcome(self) -> str:
-        if self.dense_hit and self.hybrid_hit:
-            return "always-hit"
-        if not self.dense_hit and self.hybrid_hit:
-            return "fixed"
-        if self.dense_hit and not self.hybrid_hit:
-            return "regressed"
-        return "still-broken"
-
-
-@dataclass
-class RetrievalCompareReport:
-    preset: str
-    k: int
-    rows: list[RetrievalCompareRow] = field(default_factory=list)
-
-    def rows_by_outcome(self, outcome: str) -> list[RetrievalCompareRow]:
-        return [r for r in self.rows if r.outcome == outcome]
-
-    @property
-    def dense_hit_rate(self) -> float:
-        return sum(r.dense_hit for r in self.rows) / len(self.rows) if self.rows else 0.0
-
-    @property
-    def hybrid_hit_rate(self) -> float:
-        return sum(r.hybrid_hit for r in self.rows) / len(self.rows) if self.rows else 0.0
-
-    def describe(self) -> str:
-        fixed = self.rows_by_outcome("fixed")
-        regressed = self.rows_by_outcome("regressed")
-        still_broken = self.rows_by_outcome("still-broken")
-        n = len(self.rows)
-        lines = [
-            f"Retrieval mode comparison — preset {self.preset}, hit-rate@{self.k} "
-            f"(dense-only vs dense+BM25 fused by RRF; same embedder, same store, same k — "
-            f"the ONE thing that changed is the retrieval strategy)",
-            f"  dense  hit-rate@{self.k} : {self.dense_hit_rate:.0%}  "
-            f"({sum(r.dense_hit for r in self.rows)}/{n})",
-            f"  hybrid hit-rate@{self.k} : {self.hybrid_hit_rate:.0%}  "
-            f"({sum(r.hybrid_hit for r in self.rows)}/{n})   "
-            f"<- {self.hybrid_hit_rate - self.dense_hit_rate:+.0%}",
-            f"  fixed by hybrid     : {len(fixed)}",
-            f"  regressed by hybrid : {len(regressed)}  (hybrid made these WORSE — report this, don't hide it)",
-            f"  still broken        : {len(still_broken)}  (this change did NOT fix these)",
-        ]
-        if fixed:
-            lines.append("\n  fixed:")
-            for r in fixed:
-                lines.append(
-                    f"    - {r.gold.ticket_id}  dense=miss -> hybrid=rank {r.hybrid_rank}  | {r.gold.question}"
+        low = answer.text.lower()
+        missing = [s for s in question.must_contain if s.lower() not in low]
+        if missing:
+            labels.append(
+                FailureLabel(
+                    question,
+                    "generation",
+                    f"the right text was in context at rank {context_rank}, but the "
+                    f"answer omitted: {', '.join(repr(m) for m in missing)}",
                 )
-        if regressed:
-            lines.append("\n  regressed:")
-            for r in regressed:
-                lines.append(
-                    f"    - {r.gold.ticket_id}  dense=rank {r.dense_rank} -> hybrid=miss  | {r.gold.question}"
-                )
-        if still_broken:
-            lines.append("\n  NOT fixed by this change:")
-            for r in still_broken:
-                lines.append(f"    - {r.gold.ticket_id}  both miss  | {r.gold.question}")
-        return "\n".join(lines)
+            )
+        else:
+            labels.append(
+                FailureLabel(question, "pass", f"answered from context rank {context_rank}")
+            )
+
+    return FailureReport(preset=name, labels=labels, generated=use_llm)
 
 
-def compare_retrieval_modes(
-    store: SearchBackend,
-    cfg: AppConfig,
-    preset: str,
-    *,
-    embedder: Embedder,
-    bm25: BM25Index | None = None,
-    gold: list[GoldQuestion] | None = None,
-    k: int = 3,
-    flt: MetaFilter | None = None,
-) -> RetrievalCompareReport:
-    """Measure hit-rate@k for dense-only vs hybrid retrieval on the SAME
-    questions, SAME embedder, SAME store, SAME pool size.
-
-    Deliberately does not involve the cross-encoder: the reranker is
-    unchanged in both conditions, so running results through it would blend
-    its effect into what should be a clean measurement of the retrieval
-    strategy alone — "did the right document even reach the candidate pool",
-    not "where did it end up after reranking".
-    """
-    questions = [g for g in (gold or GOLD) if g.answerable]
-    index = bm25 or BM25Index.from_store(store)
-    report = RetrievalCompareReport(preset=preset, k=k)
-
-    for item in questions:
-        qvec = embedder.encode_queries([item.question])[0]
-        dense = retrieve(store, qvec, k=cfg.retrieve_k, flt=flt)
-        # dense_pool is pinned to the SAME cfg.retrieve_k used by the dense-only
-        # arm above. hybrid_retrieve's own default would silently widen it to
-        # max(k*2, 10), which would let hybrid see more dense candidates than
-        # dense-only does — a second uncontrolled variable hiding inside what
-        # should be a one-variable comparison.
-        hybrid = hybrid_retrieve(
-            store, index, qvec, item.question, k=cfg.retrieve_k, flt=flt,
-            dense_pool=cfg.retrieve_k,
-            bm25_pool=cfg.retrieval.bm25_pool, k_rrf=cfg.retrieval.rrf_k,
-        )
-        dense_hit, dense_rank = _hit_at_k(dense, item.ticket_id, k)
-        hybrid_hit, hybrid_rank = _hit_at_k(hybrid, item.ticket_id, k)
-        report.rows.append(RetrievalCompareRow(
-            gold=item, dense_hit=dense_hit, hybrid_hit=hybrid_hit,
-            dense_rank=dense_rank, hybrid_rank=hybrid_rank,
-        ))
-    return report
-
-
-def boundary_bleed(chunks) -> tuple[int, int]:
-    """(chunks spanning >1 ticket, total chunks) — the flat-strategy defect."""
-    total = len(chunks)
-    bleeding = sum(1 for c in chunks if c.metadata.get("bleed"))
-    return bleeding, total
-
-
-def load_default_config() -> AppConfig:
-    return load_config()
+def report_to_json(report: EvalReport) -> str:
+    """Machine-readable summary, for diffing two runs against each other."""
+    return json.dumps(
+        {
+            "preset": report.preset,
+            "k": report.k,
+            "n": report.n,
+            "hit_rate_at_k": round(report.hit_rate, 4),
+            "recall_at_k": round(report.recall_at_k, 4),
+            "mrr": round(report.mrr, 4),
+            "hit_rate_at_n": round(report.hit_rate_after_rerank, 4),
+            "recall_at_n": round(report.recall_at_n, 4),
+            "rerank_lift": round(report.rerank_lift, 4),
+            "refusal_accuracy": round(report.refusal_accuracy, 4),
+            "false_refusals": len(report.false_refusals),
+            "answer_accuracy": round(report.answer_accuracy, 4) if report.generated else None,
+        },
+        indent=2,
+    )

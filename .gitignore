@@ -5,6 +5,17 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+# Your corpus is your data. Files uploaded through the UI land in
+# data/tickets/ and must not be committed by accident; .gitkeep keeps the
+# folder itself in the repo so the uploader always has somewhere to write.
+data/tickets/*
+!data/tickets/.gitkeep
 data/store/
+data/traces/
 *.npz
 .DS_Store
+# Build output from `pip install -e .`
+*.egg-info/
+build/
+dist/
+data/gold.yaml
