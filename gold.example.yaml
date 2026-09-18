@@ -9,6 +9,13 @@
 #   expect_in_chunk  string(s) a RETRIEVED CHUNK must contain (retrieval ground
 #                    truth). Defaults to must_contain; set it separately when
 #                    the document phrases a fact differently from the answer.
+#   reference_answer a full SENTENCE a correct answer would convey. Needed only
+#                    by RAGAS context recall (`eval --ragas`); every other metric
+#                    ignores it. It cannot be derived from the other two fields:
+#                    `must_contain` holds fragments, and `expect_in_chunk` is
+#                    DEFINED as text appearing in a retrieved chunk, so a recall
+#                    computed from it would be 1.0 by construction - a number
+#                    that looks like evidence and is not.
 #   unanswerable     true = the corpus genuinely cannot answer this, and the
 #                    app MUST refuse. Include several — without them you cannot
 #                    tell a calibrated gate from one that never refuses.
@@ -19,7 +26,8 @@
 
 - question: How long is a password reset link valid for?
   must_contain: "60 minutes"
-  note: single clean lookup
+  reference_answer: "A password reset link is valid for 60 minutes."
+  note: single clean lookup, with a reference so context recall can be measured
 
 - question: What are the steps to resolve a duplicate invoice?
   must_contain:

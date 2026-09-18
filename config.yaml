@@ -91,6 +91,64 @@ qdrant:
   ef_construct: 100
   hnsw_ef: 128
 
+# How answers are graded, and by whom. Everything here is inert until you type
+# an explicit flag: `eval` on its own still makes zero LLM calls, forever.
+#
+# The judge is a DIFFERENT, STRONGER model than the one that wrote the answer.
+# A model grading its own output rates its own phrasing above an equivalent
+# answer worded differently, so a same-model judge measures agreement with
+# itself. That is a real effect, and `python -m rag_app judge` exists to check
+# whether this judge agrees with YOUR labels rather than asking you to trust it.
+#
+# Costs, per question, on the judge model:
+#   --judge   1 call     --geval   geval_samples calls (5)
+#   --ragas   4 calls, plus 1 more for each question with a reference_answer
+# `eval` prints the estimate before the first call and refuses to start above
+# max_llm_calls, so a wide run on a large gold set costs nothing to discover.
+#
+# geval_samples > 1 requires geval_temperature > 0: G-Eval replaces the paper's
+# logprob weighting with sampling, and N identical greedy samples cost Nx for no
+# variance estimate. See judge.py.
+evaluation:
+  judge_model: openai/gpt-4o
+  geval_samples: 5
+  geval_temperature: 1.0
+  max_llm_calls: 200
+
+# The ReAct agent (agent.py) - a SECOND control flow over the same retrieval
+# stages and the same grounding gate as ask(). Nothing here affects `ask`.
+#
+# Each step is one LLM call, so a 6-step agent can cost 6x what ask() spends on
+# a question ask() answers in one pass. On a small corpus the agent usually
+# LOSES: more calls, more latency, no better answer on single-hop lookups. It
+# should win only on multi-hop questions and "which document says X".
+# `python -m rag_app arena` checks that on your corpus instead of asserting it.
+#
+# Every budget below produces a VISIBLE failure when it trips: DONT_KNOW, no
+# sources, and a stop reason naming the number. An agent that ran out of steps
+# has not answered, and partial prose with sources attached would be a lie.
+#
+# max_prompt_chars is CHARACTERS, not tokens (~4 chars/token). A real token
+# count needs a tokenizer dependency this project deliberately avoids - the
+# same honesty chunk_size already requires.
+agent:
+  implementation: plain     # plain | langgraph  (langgraph needs .[agents])
+  max_steps: 6
+  max_tool_calls: 8
+  max_llm_calls: 8
+  max_prompt_chars: 24000
+  wall_clock_seconds: 60
+  max_observation_chars: 2000
+  # Memory is off by default: it costs an embedder pass per turn and puts
+  # recalled text into the prompt, which is a real change to what the model
+  # reads. Its Qdrant index lives in its own directory, never the corpus one -
+  # see memory.py for why that is load-bearing rather than tidy.
+  memory:
+    enabled: false
+    backend: plain          # plain | mem0  (mem0 needs .[mem0])
+    short_term_turns: 8
+    vector_recall_k: 3
+
 llm:
   base_url: https://openrouter.ai/api/v1
   # Change model anytime: https://openrouter.ai/models

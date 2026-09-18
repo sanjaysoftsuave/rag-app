@@ -23,7 +23,7 @@ How the venv got fixed, in case it recurs: `pyvenv.cfg` pointed at a `home =` in
 ## Commands
 
 ```bash
-python -m pytest -q                    # 161 passed, ~2s — real embedded Qdrant per test
+python -m pytest -q                    # 510 passed, 1 skipped, ~5s — real embedded Qdrant per test
 python -m pytest tests/test_grounding.py -q            # the four grounding guarantees
 python -m pytest tests/test_pdfs.py tests/test_explain.py -q   # PDF loading + UI introspection
 
@@ -32,8 +32,23 @@ python -m rag_app ask "..." [--filter k=v] [--quiet]   # one question, full trac
 python -m rag_app chunks [--all] [--show N]            # preview chunking; loads no models
 python -m rag_app models                               # embedding + reranker registries
 python -m rag_app eval [--generate] [--json]           # hit-rate@k, recall@k, MRR, rerank lift
+python -m rag_app eval --generate --judge --geval --ragas [--snapshot LABEL] [--limit N]
 python -m rag_app debug [--generate] [--show-pass]     # retrieval vs generation failures
+python -m rag_app codes [--init] [--json]              # rank your open-coding categories
+python -m rag_app judge [--init] [--json]              # judge vs your labels: agreement + kappa
+python -m rag_app compare BEFORE AFTER [--json]        # diff two eval snapshots
+python -m rag_app agent "..." [--impl plain|langgraph] [--max-steps N] [--memory]
+python -m rag_app arena [--arms workflow,agent] [--generate]   # workflow vs agent
+python -m rag_app atasks [--tasks PATH] [--generate]   # trajectory-level agent eval
 ```
+
+**`eval` with no flags makes zero LLM calls, and always will.** The substring
+metrics are the free regression tripwire; every scorer that spends money has to be
+typed. `--judge`/`--geval`/`--ragas` require `--generate` (there is no answer to
+score otherwise), the estimate is printed to stderr *before* the first call, and
+`evaluation.max_llm_calls` refuses the run above its ceiling rather than partway
+through. Calls per question, at `rerank_n=3`: judge 1, G-Eval `geval_samples` (5),
+RAGAS 4 plus 1 more for each question with a `reference_answer`.
 
 **There is no `ingest` command.** Building the index is a UI action (*Add documents → Run ingest*), deliberately in one place so the two surfaces cannot drift. `run_ingest()` is still a plain function and is what the tests call.
 
@@ -48,7 +63,19 @@ data/tickets/*.md, *.txt, *.pdf  (each file windowed on its own) → chunk → b
 question → embed → [dense top-K | dense+BM25 fused by RRF] → cross-encoder rerank top-N → score gate → LLM
 ```
 
-Plain Python by design. **No LangChain / LlamaIndex.** The Streamlit UI ([ui.py](src/rag_app/ui.py)) is the primary surface, but it is a *second surface over the same `ask()`*, never a second implementation — and `ask`/`chunks`/`models` still run with streamlit uninstalled. Qdrant is the only vector store; there is no in-process numpy fallback.
+**Plain Python is the backbone; the frameworks are a labelled exhibit.** The
+retrieval pipeline, the CLI, the UI and the entire offline suite import no
+LangChain, LangGraph, LlamaIndex or mem0 — `tests/test_no_framework_imports.py`
+fails the build if that stops being true. What changed in Week 7 is that
+[agent_langgraph.py](src/rag_app/agent_langgraph.py) and
+[memory_mem0.py](src/rag_app/memory_mem0.py) exist as a deliberate side-by-side
+comparison against `agent.py`/`memory.py`: **same tools, same prompt, same
+grounding gate**, different control flow and different memory machinery, so each
+framework's cost is measurable rather than asserted. They sit behind
+`pip install -e ".[agents]"` / `".[mem0]"`, import lazily inside function bodies,
+and nothing on the path that answers a question imports them. The old rule was
+"no frameworks anywhere"; the rule now is **"no frameworks on the path that
+answers a question."** The Streamlit UI ([ui.py](src/rag_app/ui.py)) is the primary surface, but it is a *second surface over the same `ask()`*, never a second implementation — and `ask`/`chunks`/`models` still run with streamlit uninstalled. Qdrant is the only vector store; there is no in-process numpy fallback.
 
 **A structured `.jsonl` ticket corpus used to be the point of this app and is now gone**, along with `tickets.py`, the three chunk strategies, `evaluate.py`/`GOLD`, `sampling.py`, `traces.py` and `repl.py`. What remains is documents and PDFs. If you find a comment referring to tickets, ticket ids or chunking strategies, it is stale — `git log` has the old code if a measurement harness is ever wanted back.
 
@@ -120,6 +147,15 @@ When comparing modes, pin `dense_pool` explicitly in both `ask()` and `compare_r
 
 `ask()` accepts `embedder`, `reranker`, `generate_fn`, `store` and `bm25` overrides; `run_ingest()` accepts `embedder`; `generate_answer()` accepts `client`. Preserve these — they are the only reason the suite runs without network access or a torch download.
 
+Week 6 and 7 add more of the same shape: `judge_fn(system, user, cfg) -> str` is
+**one seam for six prompt types** (the gold judge, the trace judge, G-Eval and all
+four RAGAS prompts), so a single `conftest.FakeJudge` covers every scorer;
+`llm_fn(messages, cfg) -> str` drives the whole agent loop from
+`conftest.scripted_llm`; `clock` makes the wall-clock budget deterministic; and
+[llm.py](src/rag_app/llm.py) is now the **only** place `openai` is imported —
+`build_client` returns an injected client *before* the API-key check, so a test
+never needs a key and never imports the SDK.
+
 `Embedder` and `CrossEncoderReranker` import `sentence_transformers` *inside* `__init__`, not at module scope, so importing `rag_app.pipeline` does not drag in torch. Keep those imports lazy.
 
 Both torch models cost seconds and hundreds of MB to construct, so anything that runs more than one query must reuse them. The UI does this with `@st.cache_resource` on `_models()`; without it every widget interaction would reload them. Same reasoning for `BM25Index.from_store()` in hybrid mode — build it once per preset, not per question.
@@ -147,6 +183,146 @@ All three registered models are 384-dim because they are the same size class, wh
 - **`pass`** / **`unconfirmed`** — `unconfirmed` means the text reached context but `--generate` was not passed, so nothing checked the answer. Claiming `pass` there would assert something nothing verified.
 
 The boundary is membership in the final `rerank_n` context, not "rank 1". A chunk at rank 3 of 3 still reached the model.
+
+### The judge is a different, stronger model — and the judge is itself validated
+
+`answer_ok` in [evaluate.py](src/rag_app/evaluate.py) is substring matching, and it
+is wrong in both directions: gold wanting `"3 business days"` fails an answer
+saying *"after three business days"*, and gold wanting `"cached"` passes an answer
+saying *"the cache was not the problem"*. [judge.py](src/rag_app/judge.py) asks a
+model whether the answer conveys the FACT. **Both are reported on adjacent lines
+and the disagreement list is printed** — that gap is the measurement, and a judge
+agreeing with substring matching everywhere would not be worth its cost.
+
+`evaluation.judge_model` defaults to a *different, stronger* model than
+generation, because a model grading its own output prefers its own phrasing. A
+same-model judge is deliberately **allowed** (the report warns instead of the
+loader refusing) since seeing that effect is the teaching point.
+
+Four decisions worth preserving:
+
+- **`unscored` is never `incorrect`.** Parse failure, exception, exhausted budget,
+  and `used_llm=False` all land there and leave the denominator. Counting a judge
+  malfunction as a wrong answer makes an unreliable judge look like a broken app.
+- **The gold judge never sees the retrieved contexts.** Correctness and
+  groundedness are different properties; RAGAS faithfulness measures the second.
+  Fusing them lets a fluent answer built on a wrong excerpt score `correct`.
+  `judge_trace` is the exception — it has no reference, so context is all it has.
+- **JSON key order is `reasoning` → `verdict`.** The model is autoregressive;
+  verdict-first makes the reasoning a post-hoc rationalisation.
+- **No prose fallback when parsing.** *"The answer is not incorrect"* contains
+  `"incorrect"`, so a substring scan would misread it into a real-looking number.
+
+[judge_validation.py](src/rag_app/judge_validation.py) measures the judge against
+the labels you wrote in the Week-5 coding sheet, using the **trace** prompt so the
+judge sees exactly what you saw. It reports raw agreement **and Cohen's kappa**:
+if you labelled 17 of 20 `correct` and the judge says `correct` to everything, raw
+agreement is 85% and the judge is a constant function. When both raters used one
+label, kappa is 0/0 — it returns `nan` and says so, because reporting 1.0 there
+would be the most misleading number in the repo. At n=20 **the deliverable is the
+disagreement list, not the coefficient**, and `describe()` prints that limit
+unconditionally.
+
+### RAGAS's four metrics are implemented here, not imported
+
+Same argument as `bm25.py`: each is ~40 lines, and reading them is the only way to
+know what the number means. Every metric returns its **intermediate evidence** —
+the statements, the per-context verdicts — because a bare float is unauditable.
+
+Four traps, each pinned by a test:
+
+- **An answer with no extractable claims is `unscored`, never faithfulness 1.0.**
+  Scoring it 1.0 makes a refusal maximally faithful, and the metric then rewards
+  the gate for refusing everything.
+- **Answer relevancy encodes BOTH sides with `encode_queries`.** bge is
+  asymmetric; using `encode_documents` on one side of a question-to-question
+  comparison shifts every similarity by a constant with no error anywhere.
+- **Context precision is rank-aware** (Average Precision): `[useful, junk, junk]`
+  scores 1.0 and `[junk, junk, useful]` scores 1/3. A short verdict array fails
+  visibly rather than silently scoring fewer contexts.
+- **Context recall needs `GoldQuestion.reference_answer`**, and both shortcuts are
+  rejected: `must_contain` holds fragments, and `expect_in_chunk` is *defined* as
+  text in a retrieved chunk, so recall from it would be 1.0 by construction. A
+  question with no reference reports `None` — **not 0.0**, since averaging a zero
+  for missing data reports a regression that never happened.
+
+Absolute values do not transfer across corpora — answer relevancy's floor is
+~0.3–0.6, not 0. Only the same metric on the same questions before and after a
+change means anything, which is what
+[before_after.py](src/rag_app/before_after.py) is for. It fingerprints the gold
+set and shouts when two snapshots were taken against different ones, prints the
+changed settings *before* the deltas (a number with no stated cause is not a
+finding), and states what one question is worth so a sub-noise delta is not read
+as a trend.
+
+### G-Eval does not use logprobs, and says so
+
+The paper computes `E[score] = Σ p(s)·s` over the 1–5 token distribution.
+OpenRouter does not reliably forward logprobs — it accepts the parameter, and
+whether it arrives depends on the upstream provider, with the field simply absent
+when it does not. So the same expectation is estimated by **sampling**:
+`geval_samples` calls at `geval_temperature`, averaged. `config.py` **rejects**
+`geval_samples > 1` with `geval_temperature: 0`, because N identical greedy
+samples cost N× and estimate no variance — that one rule encodes the whole
+substitution as an invariant. `stdev` is reported next to the mean: `[1,5,1,5,3]`
+averages to 3.0 and is not a 3. A score outside 1–5 is **dropped, not clamped**;
+clamping a `7` to `5` launders a misunderstood rubric into a maximal score.
+
+Auto-CoT is also dropped: generating the rubric per run would produce a different
+rubric every run and destroy the run-to-run comparability before/after depends on.
+
+### The agent does not bypass the gate
+
+`search_documents` wraps retrieve → rerank → top-N, **not `pipeline.ask()`**.
+Wrapping `ask()` looks safer and is not: the agent still writes its own prose over
+the sub-answers, and that text is a second, ungated generation. The four
+guarantees are relocated, and a fifth is added:
+
+| Guarantee | Where it lives in the agent |
+|---|---|
+| 1. score gate | **Inside the tool.** Below threshold it returns a "nothing matched" string and contributes zero evidence, so the model cannot see the rejected text. Stricter than `ask()`. |
+| 2. citation rules | `generate.CITATION_RULES`, shared **verbatim** with `build_prompt`. Two prompts explaining citations in different words are two contracts, and only one was debugged against the `[CS-1001]` failure. |
+| 3. refusal strips sources | applied to the final answer, exactly as `ask()` does |
+| 4. invented citations | checked against the union of evidence from **every** step |
+| **5. no-evidence gate** | **new.** A final answer produced without any tool ever returning an excerpt is forced to `DONT_KNOW`. An agent answering from its own weights is the failure only this shape produces, and nothing in `ask()` ever needed to catch it. |
+
+Memory text is deliberately **not citable**: `cited_sources()` only accepts labels
+present in the evidence, so a memory-sourced citation is reported as hallucinated.
+
+`parse_action()` is tolerant about presentation (case, bold, fences, JSON input)
+and strict about two things: a reply with no `Action:` line is a parse failure and
+**never an implicit final answer**, and anything after a model-written
+`Observation:` is **discarded** — models pre-fill fake observations, and keeping
+them lets the model invent its own tool results.
+
+### Budgets produce a visible failure, never a truncated answer
+
+Seven budgets (`max_steps`, `max_tool_calls`, `max_llm_calls`, `max_prompt_chars`,
+`wall_clock_seconds`, `max_parse_failures`, `repeat_action_limit`). **Every trip
+sets `failed=True`, returns `DONT_KNOW` and `sources=[]`**, and `describe()` names
+the number that tripped. An agent that ran out of budget has not answered;
+attaching partial prose to a truncated run is the dishonesty the `failed=True`
+precedent exists to prevent. The trajectory is preserved in `steps` — it just does
+not become an answer.
+
+The prompt budget is checked **before** the call, so an over-budget prompt costs
+nothing (tripwire-tested). `clock` is injectable so the wall-clock budget is
+testable without sleeping.
+
+### Agent memory has its own Qdrant directory, and why
+
+Three options; only one survives. **Same collection as the corpus** would let
+`search_documents` retrieve memories and hand them to the model under a `[source]`
+header — a remembered guess becomes a citable document. **Same directory** fails
+too: `QdrantClient(path=...)` locks the *directory*, not the collection, so
+`ui.close_handles(preset)` would close memory mid-conversation. So memory gets
+`data/agent_memory/qdrant_memory/`: its own lock, its own lifetime.
+
+**The JSONL is the source of truth; Qdrant is derived.** `QdrantStore.build()`
+deletes and recreates a collection, so appending a memory rebuilds from the log —
+the same relationship the corpus already has, milliseconds at memory scale, and
+decisively **zero changes to `qdrant_store.py`**, the most scarred file here. It
+is O(N) per write; at tens of thousands of turns it would need a real upsert path.
 
 ### MMR, query rewriting and HyDE are built and OFF by default
 
@@ -198,7 +374,8 @@ Swapping the model is a `config.yaml` edit plus a re-ingest. `StoreMeta.assert_c
 
 ### The test suite pays a real, measured cost for testing the real backend
 
-Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **208 passed, 1 skipped in ~3s** (measured, Python 3.14.7).
+Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **510 passed, 1 skipped in ~5s** (measured, Python 3.14.7, with both optional
+extras installed; the skip is the without-langgraph branch).
 
 Still fully offline (no network, no model download) and fast enough to run on every change, just no longer near-instant. If a test needs to reopen a store it just built (proving a fix like the one above), it must explicitly `.close()` the first handle first — embedded mode holds a real file lock.
 
@@ -250,5 +427,6 @@ API key resolution is `OPENROUTER_API_KEY`, falling back to `LLM_API_KEY`.
 - `docs_dir` on `AppConfig` is dead — nothing reads it, and it is no longer required in `config.yaml`. `tickets_dir` is the real (badly named) corpus directory.
 - The Qdrant collection is named `documents`; stores built before that rename hold a `tickets` collection and will read as "no index — go ingest". Rebuilding takes about a second.
 - Chunking is character-based, not token-based, despite `chunk_size` reading like tokens.
-- **[README.md](README.md)'s Commands table predates `chat`, `debug` and `sample`** — it lists only six of the ten subcommands. (Its "numpy or Qdrant" diagram, its `meta.json` claim in §5, and its "16 answerable" gold count in §Evaluation were all corrected; trust `config.yaml` and the source if anything else there disagrees.)
-- `analysis/error_analysis.md` cites a 57-question sample pool; `SAMPLE_QUESTIONS` now holds **61**. The seed-42 draw in `data/traces/` was taken against the smaller pool, so re-running `sample --seed 42 --n 20` today will **not** reproduce that exact batch.
+- The OpenAI client block used to be duplicated in `generate.py` and `rewrite.py`; it now lives once in [llm.py](src/rag_app/llm.py). If you add a seventh caller, use `chat_once`/`chat_messages` rather than a third copy.
+- `data/traces/sample_seed42_n20*.{jsonl,md}` are **stale**: they were generated against the deleted `.jsonl` ticket corpus (`TIC-1001`..`TIC-1035`) and a `sample` command that no longer exists. The current batch is `sample_current_n20*`. The old files are kept only as a format reference.
+- The honest limits on the evaluation numbers here: the gold set is 13 questions (9 answerable), the human label set is 20 traces, G-Eval has no logprobs, RAGAS absolute values do not transfer across corpora, and the judge is validated against **one person's** labels — so "agreement" means agreement with you.

@@ -115,3 +115,104 @@ def make_qdrant_store(tmp_path, chunks, vectors, meta: StoreMeta | None = None, 
     store = QdrantStore(meta_dir=path, path=path)
     store.build(chunks, vectors, meta)
     return store
+
+
+class FakeJudge:
+    """A `judge_fn(system, user, cfg) -> str`, recording everything it was sent.
+
+    One seam serves six prompt types (the gold judge, the trace judge, G-Eval
+    and the four RAGAS prompts), so this one fake covers all of them.
+
+    `replies` is either a single string answered to everything, or a mapping of
+    {system prompt constant: reply}. A list value is popped in order, which is
+    what makes multi-sample G-Eval testable. An unmatched system prompt raises
+    rather than returning a default: a scorer sending an unexpected prompt is a
+    bug worth failing on, not one worth quietly scoring.
+    """
+
+    def __init__(self, replies, calls_raise: bool = False):
+        self.replies = replies
+        self.calls_raise = calls_raise
+        self.seen: list[tuple[str, str]] = []
+
+    @property
+    def calls(self) -> int:
+        return len(self.seen)
+
+    @property
+    def systems(self) -> list[str]:
+        return [s for s, _ in self.seen]
+
+    def __call__(self, system, user, cfg):
+        self.seen.append((system, user))
+        if self.calls_raise:
+            raise RuntimeError("the judge API is down")
+        if isinstance(self.replies, str):
+            return self.replies
+        try:
+            reply = self.replies[system]
+        except KeyError:
+            raise AssertionError(
+                f"FakeJudge got an unscripted system prompt "
+                f"(starts {system[:60]!r})"
+            ) from None
+        if isinstance(reply, list):
+            if not reply:
+                raise AssertionError("FakeJudge ran out of scripted replies")
+            return reply.pop(0)
+        return reply
+
+
+def verdict_json(verdict="correct", reasoning="because", confidence=0.9) -> str:
+    import json
+
+    return json.dumps(
+        {"reasoning": reasoning, "verdict": verdict, "confidence": confidence}
+    )
+
+
+def geval_json(score=4, reasoning="because") -> str:
+    import json
+
+    return json.dumps({"reasoning": reasoning, "score": score})
+
+
+def scripted_llm(*replies):
+    """An `llm_fn(messages, cfg) -> str` that returns `replies` in order.
+
+    Records every prompt in `.seen`, which is what lets a test prove the loop
+    actually loops (the observation of step N must appear in the prompt of step
+    N+1). Running past the script raises with a COUNT rather than an IndexError:
+    a runaway loop should fail saying how many turns it took.
+    """
+    queue = list(replies)
+    seen: list[list[dict]] = []
+
+    def _call(messages, cfg):
+        seen.append(messages)
+        if not queue:
+            raise AssertionError(
+                f"the agent asked for reply #{len(seen)} but only "
+                f"{len(replies)} were scripted"
+            )
+        return queue.pop(0)
+
+    _call.seen = seen  # type: ignore[attr-defined]
+    return _call
+
+
+def boom_llm(messages, cfg):
+    raise RuntimeError("the API is down")
+
+
+class FakeClock:
+    """Deterministic monotonic clock: every read advances by `step`."""
+
+    def __init__(self, start: float = 0.0, step: float = 1.0):
+        self.now = start
+        self.step = step
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value

@@ -62,6 +62,7 @@ from typing import Any
 import yaml
 
 from rag_app.config import AppConfig, load_config
+from rag_app.judge import geval_score, judge_answer
 from rag_app.pipeline import ask
 from rag_app.store import ScoredChunk
 
@@ -93,6 +94,18 @@ class GoldQuestion:
     expect_in_chunk: list[str] = field(default_factory=list)
     unanswerable: bool = False
     note: str = ""
+    # A full sentence a correct answer would convey. Required ONLY by RAGAS
+    # context recall, which asks whether the retrieved contexts cover everything
+    # the reference says; every other metric ignores it. Optional because
+    # data/gold.yaml is user data that predates this field.
+    #
+    # It cannot be derived from the other two fields, and both shortcuts are
+    # worse than having no metric. `must_contain` holds fragments ("cached",
+    # "3 business days") and asking whether "cached" is attributable to a
+    # context is degenerate. `expect_in_chunk` is *defined* as text appearing in
+    # a retrieved chunk, so recall computed from it would be 1.0 by
+    # construction — a number that looks like evidence and is not.
+    reference_answer: str = ""
 
     @property
     def answerable(self) -> bool:
@@ -146,6 +159,7 @@ def parse_gold(raw: Any) -> list[GoldQuestion]:
                 expect_in_chunk=expect,
                 unanswerable=unanswerable,
                 note=str(entry.get("note", "")),
+                reference_answer=str(entry.get("reference_answer", "")),
             )
         )
     return questions
@@ -179,6 +193,8 @@ def write_gold(questions: list[GoldQuestion], path: Path) -> None:
             entry["must_contain"] = q.must_contain
         if q.expect_in_chunk:
             entry["expect_in_chunk"] = q.expect_in_chunk
+        if q.reference_answer:
+            entry["reference_answer"] = q.reference_answer
         if q.note:
             entry["note"] = q.note
         payload.append(entry)
@@ -217,6 +233,12 @@ class QuestionResult:
     refused: bool
     gate: str
     answer_text: str = ""
+    # Scorers layered on top of the substring baseline. All default to None so
+    # every existing construction site — tests included — keeps working, and so
+    # a report can say "not measured" rather than implying a zero.
+    verdict: Any = None       # judge.Verdict
+    geval: Any = None         # judge.GEvalScore
+    ragas: Any = None         # ragas_metrics.RagasScores
 
     @property
     def hit(self) -> bool:
@@ -246,6 +268,10 @@ class EvalReport:
     n: int
     results: list[QuestionResult]
     generated: bool = False
+    judged: bool = False
+    scored_ragas: bool = False
+    gen_model: str = ""
+    judge_model: str = ""
 
     @property
     def answerable(self) -> list[QuestionResult]:
@@ -316,6 +342,154 @@ class EvalReport:
     def answer_accuracy(self) -> float:
         return self._frac([r.answer_ok for r in self.answerable])
 
+    # ---- judge-side metrics -------------------------------------------
+    #
+    # `answer_accuracy` (substring) and `judge_accuracy` measure the same
+    # answers by different rules. Both are reported, and their disagreement is
+    # the interesting number — see describe().
+
+    @property
+    def substring_accuracy(self) -> float:
+        """Alias for answer_accuracy, named for the side-by-side."""
+        return self.answer_accuracy
+
+    @property
+    def scored_by_judge(self) -> list[QuestionResult]:
+        """Answerable questions the judge actually returned a verdict on.
+
+        Excludes `unscored`: a parse failure or an exhausted budget is a judge
+        malfunction, and counting it as a wrong answer would blame the app for
+        the measurer's failure.
+        """
+        return [
+            r for r in self.answerable
+            if r.verdict is not None and r.verdict.scored
+        ]
+
+    @property
+    def judge_accuracy(self) -> float:
+        rows = self.scored_by_judge
+        return (sum(1 for r in rows if r.verdict.ok) / len(rows)) if rows else 0.0
+
+    @property
+    def judge_partial(self) -> int:
+        return sum(1 for r in self.scored_by_judge if r.verdict.verdict == "partial")
+
+    @property
+    def judge_unscored(self) -> list[QuestionResult]:
+        return [
+            r for r in self.answerable
+            if r.verdict is not None and not r.verdict.scored
+        ]
+
+    @property
+    def substring_missed(self) -> list[QuestionResult]:
+        """Judge says correct, substring says no — right fact, different words."""
+        return [r for r in self.scored_by_judge if r.verdict.ok and not r.answer_ok]
+
+    @property
+    def substring_flattered(self) -> list[QuestionResult]:
+        """Substring says yes, judge says incorrect — string present, answer wrong."""
+        return [
+            r for r in self.scored_by_judge
+            if r.answer_ok and r.verdict.verdict == "incorrect"
+        ]
+
+    @property
+    def disagreements(self) -> list[QuestionResult]:
+        return self.substring_missed + self.substring_flattered
+
+    @property
+    def geval_scored(self) -> list[QuestionResult]:
+        return [r for r in self.answerable if r.geval is not None and not r.geval.failed]
+
+    @property
+    def geval_mean(self) -> float:
+        rows = self.geval_scored
+        return (sum(r.geval.score for r in rows) / len(rows)) if rows else 0.0
+
+    @property
+    def geval_stdev(self) -> float:
+        """Mean of the per-question spreads, not the spread of the means.
+
+        A question the rubric is ambiguous about is the thing worth surfacing,
+        and averaging the means would hide it.
+        """
+        rows = self.geval_scored
+        return (sum(r.geval.stdev for r in rows) / len(rows)) if rows else 0.0
+
+    @property
+    def ragas_report(self):
+        """The per-question RAGAS scores, as an aggregate report."""
+        from rag_app.ragas_metrics import RagasReport
+
+        return RagasReport(
+            rows=[(r.gold.question, r.ragas) for r in self.answerable if r.ragas is not None]
+        )
+
+    def _ragas_lines(self) -> list[str]:
+        if not self.scored_ragas:
+            return []
+        report = self.ragas_report
+        if not report.rows:
+            return []
+        return ["", *report.describe().splitlines()]
+
+    def _judge_lines(self) -> list[str]:
+        if not self.judged:
+            return []
+        lines = [
+            f"  judge accuracy   {self.judge_accuracy:6.1%}   "
+            f"LLM-as-judge ({self.judge_model}): conveys the reference fact",
+        ]
+        if self.judge_partial:
+            lines.append(
+                f"  judge partial    {self.judge_partial:6d}   "
+                f"some reference facts, contradicting none"
+            )
+        if self.judge_unscored:
+            lines.append(
+                f"  unscored         {len(self.judge_unscored):6d}   "
+                f"judge failures / questions that never reached the LLM"
+            )
+        if self.geval_scored:
+            lines.append(
+                f"  G-Eval (1-5)     {self.geval_mean:6.1f}   "
+                f"mean of {len(self.geval_scored[0].geval.samples)} samples, "
+                f"sd {self.geval_stdev:.1f}"
+            )
+        if self.judge_model and self.judge_model == self.gen_model:
+            lines.append(
+                f"  !! judge model == generation model ({self.judge_model}) - a model "
+                f"grading its own output prefers its own phrasing"
+            )
+        return lines
+
+    def _disagreement_lines(self) -> list[str]:
+        if not self.judged or not self.disagreements:
+            return []
+        rows = self.scored_by_judge
+        lines = [
+            "",
+            f"  The two disagree on {len(self.disagreements)} of {len(rows)}. "
+            f"That gap IS the measurement:",
+        ]
+        if self.substring_missed:
+            lines.append("")
+            lines.append("  [substring missed it - right fact, different words]")
+            for r in self.substring_missed:
+                wanted = ", ".join(repr(m) for m in r.gold.must_contain)
+                lines.append(f"    - {r.gold.question}")
+                lines.append(f"        wanted {wanted}; answer said: {r.answer_text[:90]}")
+                lines.append(f"        judge: {r.verdict.reasoning}")
+        if self.substring_flattered:
+            lines.append("")
+            lines.append("  [substring flattered it - string present, answer wrong]")
+            for r in self.substring_flattered:
+                lines.append(f"    - {r.gold.question}")
+                lines.append(f"        judge: {r.verdict.reasoning}")
+        return lines
+
     def describe(self) -> str:
         lines = [
             f"Preset {self.preset}  (K={self.k} -> N={self.n}, "
@@ -332,10 +506,14 @@ class EvalReport:
         ]
         if self.generated:
             lines.append(
-                f"  answer accuracy  {self.answer_accuracy:6.1%}   answers containing what they should"
+                f"  answer accuracy  {self.answer_accuracy:6.1%}   "
+                f"substring: every must_contain present in the answer"
             )
         else:
             lines.append("  answer accuracy     n/a   (retrieval only; pass --generate)")
+        lines.extend(self._judge_lines())
+        lines.extend(self._ragas_lines())
+        lines.extend(self._disagreement_lines())
         if self.false_refusals:
             lines.append("\n  Refused but answerable:")
             for r in self.false_refusals:
@@ -359,11 +537,28 @@ def evaluate(
     store=None,
     use_llm: bool = False,
     generate_fn=None,
+    judge: bool = False,
+    geval: bool = False,
+    ragas: bool = False,
+    judge_fn=None,
+    budget=None,
+    limit: int = 0,
 ) -> EvalReport:
-    """Run every gold question through the real `ask()` and score the results."""
+    """Run every gold question through the real `ask()` and score the results.
+
+    Every scorer defaults to off. `eval` with no flags makes zero LLM calls and
+    always will — the substring metrics are the free regression tripwire, and
+    anything that spends money has to be typed.
+
+    The scorers all run over the SAME `ask()` result. Re-running the pipeline
+    per scorer would, under `--generate`, produce different answers each time,
+    and the judge would be grading a run nobody looked at.
+    """
     cfg = config or load_config()
     name = preset or cfg.default_preset
     results: list[QuestionResult] = []
+    if limit:
+        gold = gold[:limit]
 
     for question in gold:
         answer = ask(
@@ -390,8 +585,43 @@ def evaluate(
             )
         )
 
+        # Scoring happens inside the loop, over this question's own Answer, so
+        # `answer.reranked` is the context the model actually read.
+        if question.answerable and (judge or geval or ragas):
+            row = results[-1]
+            if judge:
+                row.verdict = judge_answer(
+                    question.question, row.answer_text, question, cfg,
+                    used_llm=answer.used_llm, gate=answer.gate,
+                    judge_fn=judge_fn, budget=budget,
+                )
+            if geval:
+                row.geval = geval_score(
+                    question.question, row.answer_text, question, cfg,
+                    used_llm=answer.used_llm, gate=answer.gate,
+                    judge_fn=judge_fn, budget=budget,
+                )
+            if ragas:
+                # `answer.reranked` and not `reranked_all`: scoring candidates
+                # the model never read would measure a different system.
+                from rag_app.ragas_metrics import score_question
+
+                row.ragas = score_question(
+                    question.question, row.answer_text, answer.reranked, cfg,
+                    gold=question, embedder=embedder,
+                    judge_fn=judge_fn, budget=budget,
+                )
+
     return EvalReport(
-        preset=name, k=cfg.retrieve_k, n=cfg.rerank_n, results=results, generated=use_llm
+        preset=name,
+        k=cfg.retrieve_k,
+        n=cfg.rerank_n,
+        results=results,
+        generated=use_llm,
+        judged=judge or geval,
+        scored_ragas=ragas,
+        gen_model=cfg.llm.model,
+        judge_model=cfg.evaluation.judge_model if (judge or geval or ragas) else "",
     )
 
 
@@ -560,6 +790,35 @@ def report_to_json(report: EvalReport) -> str:
             "refusal_accuracy": round(report.refusal_accuracy, 4),
             "false_refusals": len(report.false_refusals),
             "answer_accuracy": round(report.answer_accuracy, 4) if report.generated else None,
+            "substring_accuracy": (
+                round(report.substring_accuracy, 4) if report.generated else None
+            ),
+            "judge_accuracy": round(report.judge_accuracy, 4) if report.judged else None,
+            "judge_unscored": len(report.judge_unscored) if report.judged else None,
+            "disagreements": len(report.disagreements) if report.judged else None,
+            "geval_mean": round(report.geval_mean, 3) if report.geval_scored else None,
+            "geval_stdev": round(report.geval_stdev, 3) if report.geval_scored else None,
+            **(
+                {
+                    f"ragas_{k}": (round(v, 4) if v is not None else None)
+                    for k, v in (
+                        (n, report.ragas_report.mean(n))
+                        for n in (
+                            "faithfulness",
+                            "answer_relevancy",
+                            "context_precision",
+                            "context_recall",
+                        )
+                    )
+                }
+                if report.scored_ragas
+                else {
+                    "ragas_faithfulness": None,
+                    "ragas_answer_relevancy": None,
+                    "ragas_context_precision": None,
+                    "ragas_context_recall": None,
+                }
+            ),
         },
         indent=2,
     )
