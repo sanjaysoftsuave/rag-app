@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rag_app.config import AppConfig
+from rag_app.llm import MISSING_KEY, chat_messages
 from rag_app.store import ScoredChunk
 
 DONT_KNOW = "I don't know — that information is not in the provided documents."
@@ -13,6 +14,22 @@ DONT_KNOW = "I don't know — that information is not in the provided documents.
 # underscores are allowed, which is why a filename works as a citation token
 # unchanged — see docs.citation_label for the fold that guarantees it.
 CITATION_RE = re.compile(r"\[([A-Za-z0-9][A-Za-z0-9._\-]*)\]")
+
+# The citation contract, stated once.
+#
+# Extracted from build_prompt so the agent's system prompt can use the SAME
+# words rather than a paraphrase. Two prompts that both "explain citations"
+# but differ in wording are two different contracts, and only one of them
+# would have been debugged against the [TIC-1001] failure recorded in
+# CLAUDE.md. A test pins that agent.SYSTEM contains this verbatim.
+CITATION_RULES = (
+    "Every factual claim must be followed by a citation in square brackets containing "
+    "the exact source label shown in that excerpt's header line, copied verbatim — "
+    "for example [handbook.pdf] or [refund-policy.md]. "
+    "The excerpt text may itself mention identifiers, reference numbers or document "
+    "names; those are NOT source labels. Cite only the header label. "
+    "Never cite a label that does not appear as an excerpt header above."
+)
 
 
 @dataclass
@@ -72,12 +89,7 @@ def build_prompt(question: str, contexts: list[ScoredChunk]) -> list[dict[str, s
 
     system = (
         "You answer questions using ONLY the excerpts provided. "
-        "Every factual claim must be followed by a citation in square brackets containing "
-        "the exact source label shown in that excerpt's header line, copied verbatim — "
-        "for example [handbook.pdf] or [refund-policy.md]. "
-        "The excerpt text may itself mention identifiers, reference numbers or document "
-        "names; those are NOT source labels. Cite only the header label. "
-        "Never cite a label that does not appear as an excerpt header above. "
+        f"{CITATION_RULES} "
         "If several excerpts disagree, say so and cite each. "
         "If the excerpts do not contain the answer, reply with exactly this and nothing else: "
         f"{DONT_KNOW}"
@@ -95,28 +107,15 @@ def generate_answer(
     cfg: AppConfig,
     client: Any | None = None,
 ) -> str:
+    # Checked here, not left to llm.build_client, because generation is the one
+    # caller that must fail loudly: the UI surfaces this message directly, and a
+    # silent degrade would look like the model refusing rather than never being
+    # asked. `build_client` raises the same message for every other caller.
     if not cfg.llm_api_key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is missing. Copy .env.example to .env and set your key."
-        )
-    if client is None:
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=cfg.llm_api_key,
-            base_url=cfg.llm.base_url,
-            timeout=cfg.llm.timeout_seconds,
-            default_headers={
-                "HTTP-Referer": "https://localhost/rag-app",
-                "X-Title": "rag-app documents",
-            },
-        )
-    response = client.chat.completions.create(
-        model=cfg.llm.model,
-        messages=build_prompt(question, contexts),
-        temperature=cfg.llm.temperature,
+        raise RuntimeError(MISSING_KEY)
+    return chat_messages(
+        build_prompt(question, contexts), cfg.llm, cfg, client=client
     )
-    return (response.choices[0].message.content or "").strip()
 
 
 def cited_sources(text: str, contexts: list[ScoredChunk]) -> tuple[list[str], list[str]]:

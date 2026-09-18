@@ -4,9 +4,15 @@ A plain-Python RAG app over your own documents. Ask a question, get an answer
 built only from what you uploaded, with the source it came from — and an
 explicit "I don't know" when the answer isn't there.
 
-No LangChain, no LlamaIndex. Every retrieval step is a function you can read and
-print, and a browser UI that shows you each one for a given question rather than
-only the answer.
+Every retrieval step is a function you can read and print, and a browser UI that
+shows you each one for a given question rather than only the answer.
+
+No framework sits on the path that answers a question — not LangChain, not
+LlamaIndex, not LangGraph. The one exception is deliberate and labelled: a
+LangGraph rebuild of the agent and a mem0 memory backend exist *beside* the plain
+ones, behind optional extras, so the cost of a framework can be measured rather
+than argued about (topic 13). A test fails the build if either reaches the core
+import path.
 
 ```
 data/tickets/*.md, *.txt, *.pdf   (each file windowed on its own)
@@ -88,6 +94,18 @@ genuinely easier without a browser:
 | `ask "..." [--filter k=v] [--quiet]` | Answer one question and print the full retrieval trace. |
 | `chunks [--all] [--show N]` | Preview how the corpus splits. Loads no models, so it is instant. |
 | `models` | The embedding-model registry and each family's prefix rules. |
+| `eval [--generate] [--judge] [--geval] [--ragas] [--snapshot L] [--limit N]` | Retrieval metrics, and optionally an LLM judge, G-Eval and RAGAS. |
+| `debug [--generate] [--show-pass]` | Label each failure: wrong text retrieved, or right text misused. |
+| `codes [--init]` | Rank your open-coding categories by frequency × severity. |
+| `judge [--init]` | Measure the LLM judge against your own labels (agreement + kappa). |
+| `compare BEFORE AFTER` | Diff two eval snapshots: what changed, and what it bought. |
+| `agent "..." [--impl plain\|langgraph] [--memory]` | Answer one question with the ReAct loop, printing every step. |
+| `arena [--arms ...] [--generate]` | The same questions through `ask()` and through the agent. |
+| `atasks [--generate]` | Trajectory-level agent evaluation. |
+
+**`eval` with no flags costs nothing.** Every scorer that calls an LLM has to be
+typed, requires `--generate`, prints its call estimate before the first request,
+and refuses to start above `evaluation.max_llm_calls`.
 
 **There is no `ingest` command.** Building the index is a UI action, deliberately
 in one place so the two surfaces cannot drift apart.
@@ -296,10 +314,113 @@ threshold outside 0–1.
 
 ---
 
+## 10. Error analysis: reading traces before fixing anything
+
+Fixing whatever you happen to notice misses whatever you did not. The method is
+to take a fair sample of real answers, write one honest sentence about each
+*before* inventing any categories, group those notes into named problem types,
+and rank the types by how often they happen times how much they hurt.
+
+Only the tooling is automated, and deliberately so — the reading is the part that
+cannot be. `codes --init` writes a blank sheet, one row per trace, carrying a
+severity rubric so twenty judgements stay on one scale. `codes` then groups the
+finished labels and ranks them by `count × mean severity`, printing both factors
+next to the weight because they pull in different directions: one catastrophe and
+nine annoyances can weigh the same and are not the same problem.
+
+The output ends with a prediction template. Writing down what you expect a fix to
+do, *before* making it, is what lets the after-measurement surprise you.
+
+See [error_analysis.py](src/rag_app/error_analysis.py).
+
+## 11. Evaluation: substring assertions, an LLM judge, G-Eval and RAGAS
+
+`must_contain` checking is free, deterministic and wrong in both directions. Gold
+wanting `"3 business days"` fails an answer saying *"after three business days"*;
+gold wanting `"cached"` passes an answer saying *"the cache was not the problem"*.
+
+So [judge.py](src/rag_app/judge.py) asks a **different, stronger** model whether
+the answer conveys the fact, and `eval` prints both accuracies on adjacent lines
+followed by the disagreement list. That gap is the measurement — a judge that
+agreed with substring matching everywhere would not be worth paying for.
+
+[ragas_metrics.py](src/rag_app/ragas_metrics.py) implements faithfulness, answer
+relevancy, context precision and context recall from scratch, for the same reason
+`bm25.py` is written out: each is ~40 lines, and reading them is the only way to
+know what the number means. Every metric returns its intermediate evidence, not
+just a float.
+
+Two honesty rules the code enforces rather than documents:
+
+- an answer with no extractable claims is **unscored**, never faithfulness 1.0 —
+  otherwise a refusal is maximally faithful and the metric rewards refusing
+  everything
+- a question with no `reference_answer` reports context recall as **not
+  measured**, never 0.0 — averaging a zero for missing data reports a regression
+  that never happened
+
+G-Eval replaces the paper's logprob weighting with multi-sample averaging, because
+OpenRouter does not reliably forward logprobs, and reports the spread alongside
+the mean: `[1,5,1,5,3]` averages to 3.0 and is not a 3.
+
+## 12. Validating the judge, and measuring a change
+
+Every number above comes from asking a model. An instrument nobody calibrated is
+a source of confident noise, so
+[judge_validation.py](src/rag_app/judge_validation.py) scores the judge against
+the labels you wrote by hand, and reports raw agreement **and Cohen's kappa**. If
+you marked 17 of 20 answers correct and the judge says correct to everything, raw
+agreement is 85% and the judge is a constant function; kappa catches that. When
+both raters used a single label kappa is undefined, and the report says so instead
+of printing a flattering 1.00.
+
+At twenty labels the deliverable is the disagreement list, not the coefficient —
+and `describe()` prints that caveat every time, unconditionally.
+
+[before_after.py](src/rag_app/before_after.py) snapshots a run's metrics and its
+settings, then diffs two snapshots. It prints **what changed before what it
+bought** (a delta with no stated cause is not a finding), warns loudly when the
+two runs used different gold sets, and states what one question is worth so a
+sub-noise delta is not read as a trend.
+
+## 13. Workflow vs agent, and what a framework costs
+
+`ask()` is a single forward pass: fixed shape, one LLM call, predictable cost.
+[agent.py](src/rag_app/agent.py) is a ReAct loop over the *same* retrieval stages
+and the *same* grounding rules, deciding for itself what to look up and when it
+has enough. `arena` runs both over your gold set and prints calls, prompt
+characters and latency side by side.
+
+The expected result is written down in the source before it is measured: **on a
+small corpus the agent loses.** It should win only on multi-hop questions and
+"which document says X". The harness exists to refute that, not confirm it.
+
+The agent does not get to bypass the gate. The score gate moves *into* the search
+tool, so below-threshold text never reaches the model at all — stricter than
+`ask()` — and a fifth guarantee is added that only this shape needs: an answer
+produced without any tool ever returning an excerpt is forced to "I don't know".
+An agent answering from its own weights is exactly what a RAG gate is for.
+
+Every budget it can hit — steps, tool calls, LLM calls, prompt size, wall clock,
+parse failures, repeated actions — produces `DONT_KNOW` with no sources and a stop
+reason naming the number. A truncated run has not answered, and dressing one up
+with partial prose would be the lie the whole design avoids.
+
+[agent_langgraph.py](src/rag_app/agent_langgraph.py) rebuilds the same loop on
+LangGraph, reusing the same tools, prompt and gate so the only variable is the
+machinery. It buys a printable graph, checkpointing, interrupt/resume and
+streaming; it costs a large dependency tree, an abstraction between you and the
+exact prompt string, and termination logic scattered into a router. For a loop
+this small the plain version wins — LangGraph starts paying when you need
+persistence or human approval, neither of which this app needs.
+
+Installing it is opt-in: `pip install -e ".[agents]"` and `".[mem0]"`, kept as two
+extras because mem0 brings its own vector store and LLM client.
+
 ## Testing
 
 ```bash
-python -m pytest -q              # 161 tests, ~2s
+python -m pytest -q              # 510 tests, 1 skipped, ~5s
 python -m pytest tests/test_grounding.py -q
 ```
 
@@ -332,7 +453,23 @@ approximation of it.
 - `score_threshold` ships at a value measured on a different corpus and will not
   transfer to yours. Tune it in the UI: drag the slider and watch which questions
   flip between answered and refused.
-- There is no automated evaluation harness. An earlier version scored hit@K, MRR,
-  rerank lift and refusal accuracy against a gold set, but that was built around a
-  structured ticket corpus and was removed with it (`git log` has it).
+- The evaluation numbers here rest on a small base and the reports say so: 13 gold
+  questions (9 answerable) and 20 human labels. One question flipping moves any
+  answerable-only rate by 11%; one flipped label moves judge agreement by 5 points.
+  These can show a judge is not obviously broken and can point at specific
+  disagreements worth reading. They cannot rank two prompts a few points apart.
+- RAGAS absolute values are not portable. Answer relevancy's floor is ~0.3–0.6 in
+  bge space, not 0, so only the same metric on the same questions before and after
+  a change means anything.
+- G-Eval samples instead of using logprobs, because OpenRouter does not reliably
+  forward them. It converges to the same quantity and costs N calls to do it.
+- The judge is validated against **one person's** labels, so "agreement" means
+  agreement with you, not with ground truth.
+- The agent's token budget counts **characters**, not tokens (~4 chars/token). A
+  real count needs a tokenizer dependency this project avoids.
+- Agent vector memory rebuilds its whole index on every write, because the JSONL
+  is the source of truth and `QdrantStore.build()` is a batch build. Invisible at
+  a few hundred turns; it would need a real upsert path at tens of thousands.
+- mem0 cannot be exercised offline — even its local mode needs a configured LLM
+  and embedder — so its tests cover the protocol shape and import guard only.
 - `data/store/` is gitignored, so a fresh clone must `ingest` before `ask`.

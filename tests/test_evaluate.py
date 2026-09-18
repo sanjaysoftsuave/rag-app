@@ -297,3 +297,186 @@ def test_unanswerable_questions_are_not_labelled(tmp_path):
                             embedder=embedder, reranker=FakeReranker(0.9))
     assert report.labels == []
     store.close()
+
+
+def test_reference_answer_is_optional_and_old_gold_files_still_parse():
+    """data/gold.yaml is user data written before RAGAS existed."""
+    [q] = parse_gold([{"question": "q", "must_contain": "x"}])
+    assert q.reference_answer == ""
+
+
+def test_reference_answer_parses_and_round_trips(tmp_path):
+    [q] = parse_gold(
+        [{"question": "q", "must_contain": "x", "reference_answer": "A full sentence."}]
+    )
+    assert q.reference_answer == "A full sentence."
+    path = tmp_path / "gold.yaml"
+    write_gold([q], path)
+    assert "reference_answer" in path.read_text(encoding="utf-8")
+    assert load_gold(make_config(tmp_path), path)[0].reference_answer == "A full sentence."
+
+
+def test_an_empty_reference_answer_is_omitted_on_write(tmp_path):
+    path = tmp_path / "gold.yaml"
+    write_gold(parse_gold([{"question": "q", "must_contain": "x"}]), path)
+    assert "reference_answer" not in path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Judge wiring: the substring baseline and the judge, side by side
+# ---------------------------------------------------------------------------
+
+
+def judged_report(rows) -> EvalReport:
+    """An EvalReport carrying verdicts, without running a pipeline."""
+    return EvalReport(
+        preset="C", k=10, n=3, results=rows, generated=True, judged=True,
+        gen_model="small/model", judge_model="big/model",
+    )
+
+
+def test_unscored_questions_leave_the_judge_denominator_rather_than_counting_wrong():
+    """A judge malfunction must not be reported as a broken RAG app."""
+    from rag_app.judge import Verdict, unscored
+
+    g = GoldQuestion(question="q", must_contain=["x"])
+    rows = [
+        result(g, 1, 1, verdict=Verdict("correct"), answer_text="x"),
+        result(g, 1, 1, verdict=unscored("the judge call failed", failed=True)),
+    ]
+    report = judged_report(rows)
+    assert len(report.scored_by_judge) == 1
+    assert report.judge_accuracy == pytest.approx(1.0)   # not 0.5
+    assert len(report.judge_unscored) == 1
+
+
+def test_the_report_prints_substring_and_judge_accuracy_on_adjacent_lines():
+    from rag_app.judge import Verdict
+
+    g = GoldQuestion(question="q", must_contain=["3 business days"])
+    rows = [
+        result(g, 1, 1, verdict=Verdict("correct", "conveys the fact"),
+               answer_text="after three business days"),
+    ]
+    out = judged_report(rows).describe()
+    lines = out.splitlines()
+    i = next(i for i, x in enumerate(lines) if "answer accuracy" in x)
+    assert "judge accuracy" in lines[i + 1]
+    assert "substring:" in lines[i]
+
+
+def test_disagreements_are_split_by_direction():
+    from rag_app.judge import Verdict
+
+    missed = GoldQuestion(question="worded differently", must_contain=["3 business days"])
+    flattered = GoldQuestion(question="string present", must_contain=["cached"])
+    rows = [
+        # judge correct, substring fails -> right fact, different words
+        result(missed, 1, 1, verdict=Verdict("correct", "same fact, different numeral"),
+               answer_text="after three business days"),
+        # substring passes, judge incorrect -> string present, answer wrong
+        result(flattered, 1, 1, verdict=Verdict("incorrect", "contradicts the reference"),
+               answer_text="the cached credentials were not the problem"),
+    ]
+    report = judged_report(rows)
+    assert [r.gold.question for r in report.substring_missed] == ["worded differently"]
+    assert [r.gold.question for r in report.substring_flattered] == ["string present"]
+    assert len(report.disagreements) == 2
+
+    out = report.describe()
+    assert "substring missed it" in out
+    assert "substring flattered it" in out
+    assert "That gap IS the measurement" in out
+
+
+def test_a_judge_that_matches_the_generation_model_is_warned_about():
+    from rag_app.judge import Verdict
+
+    g = GoldQuestion(question="q", must_contain=["x"])
+    report = EvalReport(
+        preset="C", k=10, n=3, results=[result(g, 1, 1, verdict=Verdict("correct"))],
+        generated=True, judged=True, gen_model="same/model", judge_model="same/model",
+    )
+    assert "prefers its own phrasing" in report.describe()
+
+
+def test_no_judge_warning_when_the_models_differ():
+    from rag_app.judge import Verdict
+
+    g = GoldQuestion(question="q", must_contain=["x"])
+    assert "prefers its own phrasing" not in judged_report(
+        [result(g, 1, 1, verdict=Verdict("correct"))]
+    ).describe()
+
+
+def test_evaluate_without_flags_calls_no_judge(tmp_path):
+    """Tripwire: `eval` with no scoring flags spends nothing, forever."""
+    called = {"judge": False}
+
+    def tripwire(system, user, cfg):
+        called["judge"] = True
+        return '{"verdict": "correct"}'
+
+    embedder, store = build(tmp_path)
+    cfg = make_config(tmp_path, score_threshold=0.0)
+    gold = [GoldQuestion(question="how long do reset links last?", must_contain=["60 minutes"])]
+    report = evaluate(
+        gold, preset="C", config=cfg, store=store, embedder=embedder,
+        reranker=FakeReranker(0.9), judge_fn=tripwire,
+    )
+    store.close()
+    assert called["judge"] is False
+    assert report.judged is False
+    assert report.results[0].verdict is None
+
+
+def test_evaluate_scores_the_same_answer_it_measured(tmp_path):
+    """One ask() per question; the judge grades that answer, not a fresh one."""
+    from conftest import verdict_json
+
+    embedder, store = build(tmp_path)
+    cfg = make_config(tmp_path, score_threshold=0.0)
+    gold = [GoldQuestion(question="how long do reset links last?", must_contain=["60 minutes"])]
+    seen = []
+
+    def judge_fn(system, user, cfg_):
+        seen.append(user)
+        return verdict_json("correct")
+
+    report = evaluate(
+        gold, preset="C", config=cfg, store=store, embedder=embedder,
+        reranker=FakeReranker(0.9), use_llm=True,
+        generate_fn=lambda q, c, k: "Links last 60 minutes.",
+        judge=True, judge_fn=judge_fn,
+    )
+    store.close()
+    assert "Links last 60 minutes." in seen[0]
+    assert report.judge_accuracy == pytest.approx(1.0)
+    assert report.judged is True
+
+
+def test_limit_truncates_the_gold_set(tmp_path):
+    embedder, store = build(tmp_path)
+    cfg = make_config(tmp_path, score_threshold=0.0)
+    gold = [
+        GoldQuestion(question="how long do reset links last?", must_contain=["60 minutes"]),
+        GoldQuestion(question="how long do refunds take?", must_contain=["five business days"]),
+    ]
+    report = evaluate(
+        gold, preset="C", config=cfg, store=store, embedder=embedder,
+        reranker=FakeReranker(0.9), limit=1,
+    )
+    store.close()
+    assert len(report.results) == 1
+
+
+def test_the_json_summary_carries_the_new_metrics_as_none_until_asked():
+    import json as _json
+
+    g = GoldQuestion(question="q", must_contain=["x"])
+    payload = _json.loads(
+        report_to_json(EvalReport(preset="C", k=10, n=3, results=[result(g, 1, 1)]))
+    )
+    for key in ("judge_accuracy", "geval_mean", "disagreements", "substring_accuracy"):
+        assert key in payload
+        assert payload[key] is None

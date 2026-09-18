@@ -29,6 +29,15 @@ dev = ["pytest>=8.0.0"]
 # and buttons replaced `use_container_width`, whose removal date has passed.
 ui = ["streamlit>=1.62.0"]
 pdf = ["pypdf>=4.0.0"]
+# Week 7's framework arm. Deliberately TWO extras, not one: mem0ai brings its
+# own vector store and LLM client and is the likeliest thing to disturb the
+# pinned openai/qdrant-client/torch in this venv, so it must be installable (and
+# skippable) independently of langgraph.
+#
+# Nothing on the path that answers a question imports either one --
+# tests/test_no_framework_imports.py fails the build if that changes.
+agents = ["langgraph>=0.2.0", "langchain-core>=0.3.0"]
+mem0 = ["mem0ai>=0.1.0"]
 
 [project.scripts]
 rag-app = "rag_app.cli:main"

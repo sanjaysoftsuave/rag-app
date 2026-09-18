@@ -19,3 +19,8 @@ data/traces/
 build/
 dist/
 data/gold.yaml
+
+# Eval snapshots embed your questions and your corpus numbers.
+data/eval/
+data/agent_tasks.yaml
+data/agent_memory/

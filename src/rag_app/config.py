@@ -70,6 +70,88 @@ class RetrievalConfig:
 
 
 @dataclass(frozen=True)
+class EvaluationConfig:
+    """How answers are graded, and by whom.
+
+    The judge is a SEPARATE, STRONGER model than the generator, on purpose. A
+    model grading its own output shows measurable self-preference: it rates its
+    own phrasing above an equivalent answer worded differently. The whole value
+    of a judge is a second opinion, so it defaults to a different model — and
+    `judge_validation.py` exists because that assumption is itself worth
+    checking against human labels rather than trusted.
+
+    Everything here is inert until an explicit `eval` flag is typed. See
+    judge.py (LLM-as-Judge, G-Eval) and ragas_metrics.py.
+    """
+
+    judge_model: str = "openai/gpt-4o"
+    judge_temperature: float = 0.0
+    # Longer than generation's 30s: a judge prompt carries the answer AND the
+    # contexts, and is asked to reason before it decides.
+    judge_timeout_seconds: float = 60.0
+    judge_base_url: str = ""  # "" = share llm.base_url
+    # G-Eval averages N sampled scores in place of the paper's logprob
+    # weighting, which OpenRouter does not reliably forward. See judge.py.
+    geval_samples: int = 5
+    geval_temperature: float = 1.0
+    # Hard ceiling, checked BEFORE the first call rather than partway through.
+    max_llm_calls: int = 200
+
+
+BUILTIN_TOOL_NAMES = (
+    "search_documents",
+    "keyword_search",
+    "list_sources",
+    "read_source",
+)
+
+
+@dataclass(frozen=True)
+class AgentMemoryConfig:
+    """What the agent remembers between turns, and where it lives."""
+
+    enabled: bool = False
+    backend: str = "plain"          # "plain" | "mem0"
+    dir: Path | None = None         # None -> store_dir.parent / "agent_memory"
+    short_term_turns: int = 8
+    summary_trigger_chars: int = 4000
+    summary_target_chars: int = 800
+    vector_recall_k: int = 3
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """The ReAct loop's budgets and tool set.
+
+    Every budget produces a VISIBLE failure when it trips: DONT_KNOW, no
+    sources, and a stop_reason naming the number. An agent that ran out of steps
+    has not answered, and attaching partial prose to a truncated run is the
+    dishonesty the failed=True precedent exists to prevent.
+
+    max_steps is the cost knob: each step is one LLM call, so a 6-step agent can
+    cost 6x what ask() spends on a question ask() answers in one. See compare.py
+    before raising it.
+    """
+
+    implementation: str = "plain"   # "plain" | "langgraph"
+    max_steps: int = 6
+    max_tool_calls: int = 8
+    # Separate from max_steps because a parse failure burns an LLM call without
+    # producing a step's worth of progress.
+    max_llm_calls: int = 8
+    # CHARACTERS, not tokens (~4 chars/token). A real count needs a tokenizer
+    # dependency this project deliberately does not carry — the same honesty
+    # chunk_size already requires.
+    max_prompt_chars: int = 24000
+    wall_clock_seconds: float = 60.0
+    max_parse_failures: int = 2
+    repeat_action_limit: int = 2
+    max_observation_chars: int = 2000
+    tools: tuple[str, ...] = BUILTIN_TOOL_NAMES
+    memory: AgentMemoryConfig = AgentMemoryConfig()
+
+
+@dataclass(frozen=True)
 class AppConfig:
     docs_dir: Path
     tickets_dir: Path
@@ -86,6 +168,24 @@ class AppConfig:
     rerank_score_scale: str = "sigmoid"
     qdrant: QdrantConfig = QdrantConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
+    evaluation: EvaluationConfig = EvaluationConfig()
+    agent: AgentConfig = AgentConfig()
+
+
+def judge_llm(cfg: AppConfig) -> LlmConfig:
+    """The LlmConfig the judge runs on: same key and account, different model.
+
+    Returned as an `LlmConfig` so `llm.chat_once` cannot tell a judge call from
+    a generation call — the only difference that should exist between them is
+    the model, the temperature and the timeout, and this makes that literally
+    true rather than a convention.
+    """
+    return LlmConfig(
+        base_url=cfg.evaluation.judge_base_url or cfg.llm.base_url,
+        model=cfg.evaluation.judge_model,
+        temperature=cfg.evaluation.judge_temperature,
+        timeout_seconds=cfg.evaluation.judge_timeout_seconds,
+    )
 
 
 def _resolve(path: str | Path) -> Path:
@@ -178,6 +278,75 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"(0.0), so it must be between 0 and 1; got {mmr_lambda}"
         )
 
+    e_raw = raw.get("evaluation") or {}
+    geval_samples = int(e_raw.get("geval_samples", 5))
+    if geval_samples < 1:
+        raise ValueError(
+            f"evaluation.geval_samples is {geval_samples}; G-Eval averages N sampled "
+            f"scores, so N must be at least 1 or there is nothing to average."
+        )
+    geval_temperature = float(e_raw.get("geval_temperature", 1.0))
+    if geval_samples > 1 and geval_temperature <= 0.0:
+        raise ValueError(
+            f"evaluation.geval_samples is {geval_samples} but geval_temperature is "
+            f"{geval_temperature}: sampling {geval_samples} times at temperature 0 returns "
+            f"the same score {geval_samples} times, costing {geval_samples}x for no "
+            f"variance estimate. Either set geval_samples: 1 or raise geval_temperature."
+        )
+    judge_temperature = float(e_raw.get("judge_temperature", 0.0))
+    if not 0.0 <= judge_temperature <= 2.0:
+        raise ValueError(
+            f"evaluation.judge_temperature is {judge_temperature}, outside 0-2. A judge "
+            f"is asked for a verdict, not for variety; 0 is the usual value."
+        )
+    judge_model = str(e_raw.get("judge_model", "openai/gpt-4o")).strip()
+    if not judge_model:
+        raise ValueError(
+            "evaluation.judge_model is empty. Name the model that grades answers, or "
+            "remove the key to accept the default."
+        )
+    max_llm_calls = int(e_raw.get("max_llm_calls", 200))
+    if max_llm_calls < 0:
+        raise ValueError(
+            f"evaluation.max_llm_calls is {max_llm_calls}; it is a ceiling on spending, "
+            f"so it cannot be negative. Use 0 for no ceiling."
+        )
+
+    a_raw = raw.get("agent") or {}
+    m_raw = a_raw.get("memory") or {}
+    implementation = str(a_raw.get("implementation", "plain"))
+    if implementation not in {"plain", "langgraph"}:
+        raise ValueError(
+            f"agent.implementation must be 'plain' or 'langgraph', got "
+            f"{implementation!r}"
+        )
+    memory_backend = str(m_raw.get("backend", "plain"))
+    if memory_backend not in {"plain", "mem0"}:
+        raise ValueError(
+            f"agent.memory.backend must be 'plain' or 'mem0', got {memory_backend!r}"
+        )
+    max_steps = int(a_raw.get("max_steps", 6))
+    if max_steps < 1:
+        raise ValueError(
+            f"agent.max_steps is {max_steps}, so the loop would stop before its first "
+            f"thought and every question would return DONT_KNOW."
+        )
+    summary_trigger = int(m_raw.get("summary_trigger_chars", 4000))
+    summary_target = int(m_raw.get("summary_target_chars", 800))
+    if summary_target >= summary_trigger:
+        raise ValueError(
+            f"agent.memory.summary_target_chars ({summary_target}) must be below "
+            f"summary_trigger_chars ({summary_trigger}); otherwise summarizing never "
+            f"shrinks the buffer and the trigger fires on every turn."
+        )
+    tool_names = tuple(a_raw.get("tools", BUILTIN_TOOL_NAMES))
+    unknown = [t for t in tool_names if t not in BUILTIN_TOOL_NAMES]
+    if unknown:
+        raise ValueError(
+            f"agent.tools names unknown tools {unknown}; known tools are "
+            f"{list(BUILTIN_TOOL_NAMES)}."
+        )
+
     q_raw = raw.get("qdrant") or {}
     llm_raw = raw["llm"]
 
@@ -204,6 +373,36 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             query_mode=query_mode,
             mmr=bool(r_raw.get("mmr", False)),
             mmr_lambda=mmr_lambda,
+        ),
+        evaluation=EvaluationConfig(
+            judge_model=judge_model,
+            judge_temperature=judge_temperature,
+            judge_timeout_seconds=float(e_raw.get("judge_timeout_seconds", 60.0)),
+            judge_base_url=str(e_raw.get("judge_base_url", "") or ""),
+            geval_samples=geval_samples,
+            geval_temperature=geval_temperature,
+            max_llm_calls=max_llm_calls,
+        ),
+        agent=AgentConfig(
+            implementation=implementation,
+            max_steps=max_steps,
+            max_tool_calls=int(a_raw.get("max_tool_calls", 8)),
+            max_llm_calls=int(a_raw.get("max_llm_calls", 8)),
+            max_prompt_chars=int(a_raw.get("max_prompt_chars", 24000)),
+            wall_clock_seconds=float(a_raw.get("wall_clock_seconds", 60.0)),
+            max_parse_failures=int(a_raw.get("max_parse_failures", 2)),
+            repeat_action_limit=int(a_raw.get("repeat_action_limit", 2)),
+            max_observation_chars=int(a_raw.get("max_observation_chars", 2000)),
+            tools=tool_names,
+            memory=AgentMemoryConfig(
+                enabled=bool(m_raw.get("enabled", False)),
+                backend=memory_backend,
+                dir=_resolve(m_raw["dir"]) if m_raw.get("dir") else None,
+                short_term_turns=int(m_raw.get("short_term_turns", 8)),
+                summary_trigger_chars=summary_trigger,
+                summary_target_chars=summary_target,
+                vector_recall_k=int(m_raw.get("vector_recall_k", 3)),
+            ),
         ),
         qdrant=QdrantConfig(
             url=q_raw.get("url") or None,

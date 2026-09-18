@@ -1,0 +1,48 @@
+# Agent tasks — trajectory ground truth.
+#
+# Copy to data/agent_tasks.yaml and rewrite for YOUR documents. A gold question
+# grades an ANSWER; an agent task also grades the ROUTE, because an agent can
+# reach the right answer by a path you would never ship — eight steps for a
+# one-hop lookup, a tool it should not have needed, or an answer assembled
+# without ever citing the document it came from.
+#
+#   task            what to ask the agent
+#   must_contain    string(s) the final ANSWER must contain
+#   expect_sources  label(s) the answer must CITE (citation ground truth)
+#   expect_tools    tool(s) that MUST appear in the trajectory
+#   forbid_tools    tool(s) that must NOT
+#   max_steps       the step budget you consider acceptable for this task
+#   min_steps       a floor: a multi-hop task answered in one step probably
+#                   answered from the model's own weights, which is a failure
+#                   even when the text happens to be right
+#   unanswerable    true = the corpus cannot answer it and the agent must refuse
+#   note            free text, for your own reference
+
+- task: How long is a password reset link valid for?
+  must_contain: "60 minutes"
+  expect_sources: ["handbook.pdf"]
+  expect_tools: ["search_documents"]
+  max_steps: 3
+  note: single hop — one search should be enough
+
+- task: Which document describes the refund process, and how long does it take?
+  must_contain: ["five business days"]
+  expect_tools: ["list_sources"]
+  min_steps: 2
+  max_steps: 5
+  note: two hops — find the document, then read the number out of it
+
+- task: What does error ERR-4032 mean?
+  must_contain: ["size limit"]
+  expect_tools: ["keyword_search"]
+  forbid_tools: []
+  max_steps: 3
+  note: an exact code; dense search treats it as noise, so BM25 should be chosen
+
+- task: What is the price of the Enterprise plan?
+  unanswerable: true
+  note: never stated in the corpus — the agent must refuse rather than improvise
+
+- task: What is the weather today?
+  unanswerable: true
+  note: off-topic; search should score below threshold and return no excerpt

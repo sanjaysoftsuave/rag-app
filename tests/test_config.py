@@ -178,3 +178,92 @@ def test_chunk_size_stays_under_the_embedders_ceiling():
             f"preset {name}: chunk_size {preset.chunk_size} exceeds "
             f"{spec.name}'s ~{spec.max_chars}-character ceiling"
         )
+
+
+# ---------------------------------------------------------------------------
+# evaluation: — the judge model and G-Eval's sampling
+# ---------------------------------------------------------------------------
+
+
+def test_the_evaluation_section_is_omissible(tmp_path):
+    """No `evaluation:` block at all — every config predating the feature."""
+    cfg = load_config(_write_single(tmp_path))
+    assert cfg.evaluation.judge_model == "openai/gpt-4o"
+    assert cfg.evaluation.geval_samples == 5
+    assert cfg.evaluation.max_llm_calls == 200
+
+
+def test_the_evaluation_section_parses(tmp_path):
+    cfg = load_config(
+        _write_single(
+            tmp_path,
+            evaluation={
+                "judge_model": "anthropic/claude-sonnet-4",
+                "geval_samples": 3,
+                "geval_temperature": 0.7,
+                "max_llm_calls": 40,
+            },
+        )
+    )
+    assert cfg.evaluation.judge_model == "anthropic/claude-sonnet-4"
+    assert cfg.evaluation.geval_samples == 3
+    assert cfg.evaluation.max_llm_calls == 40
+
+
+def test_judge_llm_inherits_the_base_url_and_overrides_the_model(tmp_path):
+    from rag_app.config import judge_llm
+
+    cfg = load_config(_write_single(tmp_path, evaluation={"judge_model": "big/model"}))
+    jl = judge_llm(cfg)
+    assert jl.base_url == cfg.llm.base_url      # same account, same endpoint
+    assert jl.model == "big/model"              # different model
+    assert jl.model != cfg.llm.model
+    assert jl.timeout_seconds == 60.0           # judges get longer than generation
+
+
+def test_judge_base_url_can_point_the_judge_elsewhere(tmp_path):
+    from rag_app.config import judge_llm
+
+    cfg = load_config(
+        _write_single(tmp_path, evaluation={"judge_base_url": "http://elsewhere"})
+    )
+    assert judge_llm(cfg).base_url == "http://elsewhere"
+
+
+def test_geval_samples_must_be_at_least_one(tmp_path):
+    with pytest.raises(ValueError, match="at least 1"):
+        load_config(_write_single(tmp_path, evaluation={"geval_samples": 0}))
+
+
+def test_multi_sampling_at_temperature_zero_is_rejected(tmp_path):
+    """N identical scores cost Nx and estimate no variance at all."""
+    with pytest.raises(ValueError, match="same score"):
+        load_config(
+            _write_single(
+                tmp_path, evaluation={"geval_samples": 5, "geval_temperature": 0.0}
+            )
+        )
+
+
+def test_a_single_sample_at_temperature_zero_is_fine(tmp_path):
+    cfg = load_config(
+        _write_single(tmp_path, evaluation={"geval_samples": 1, "geval_temperature": 0.0})
+    )
+    assert cfg.evaluation.geval_samples == 1
+
+
+def test_max_llm_calls_cannot_be_negative(tmp_path):
+    with pytest.raises(ValueError, match="cannot be negative"):
+        load_config(_write_single(tmp_path, evaluation={"max_llm_calls": -1}))
+
+
+def test_an_empty_judge_model_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="judge_model is empty"):
+        load_config(_write_single(tmp_path, evaluation={"judge_model": "  "}))
+
+
+def test_a_judge_model_equal_to_the_generator_is_allowed_not_rejected(tmp_path):
+    """A legitimate bad configuration. The report warns; the loader does not
+    refuse, because seeing the self-preference effect is the teaching point."""
+    cfg = load_config(_write_single(tmp_path, evaluation={"judge_model": "m"}))
+    assert cfg.evaluation.judge_model == cfg.llm.model

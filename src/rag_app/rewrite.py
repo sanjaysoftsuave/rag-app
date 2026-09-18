@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rag_app.config import AppConfig
+from rag_app.llm import chat_once
 
 REWRITE_SYSTEM = (
     "Rewrite the user's question as a short statement using the vocabulary a "
@@ -79,30 +80,14 @@ class QueryTransform:
 
 
 def _call(system: str, question: str, cfg: AppConfig, client=None) -> str:
-    """One short completion. Shares the LLM config with generation."""
-    if not cfg.llm_api_key:
-        raise RuntimeError("no API key")
-    if client is None:
-        from openai import OpenAI
+    """One short completion. Shares the LLM config with generation.
 
-        client = OpenAI(
-            api_key=cfg.llm_api_key,
-            base_url=cfg.llm.base_url,
-            timeout=cfg.llm.timeout_seconds,
-            default_headers={
-                "HTTP-Referer": "https://localhost/rag-app",
-                "X-Title": "rag-app documents",
-            },
-        )
-    response = client.chat.completions.create(
-        model=cfg.llm.model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ],
-        temperature=cfg.llm.temperature,
-    )
-    return (response.choices[0].message.content or "").strip()
+    The missing-key check now lives in `llm.build_client`, which raises the
+    informative message instead of this module's old bare "no API key".
+    `transform_query`'s `except Exception` swallows either one identically, so
+    the behaviour is unchanged and only the message a debugger sees improved.
+    """
+    return chat_once(system, question, cfg.llm, cfg, client=client)
 
 
 def transform_query(
