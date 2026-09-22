@@ -38,6 +38,13 @@ pdf = ["pypdf>=4.0.0"]
 # tests/test_no_framework_imports.py fails the build if that changes.
 agents = ["langgraph>=0.2.0", "langchain-core>=0.3.0"]
 mem0 = ["mem0ai>=0.1.0"]
+# Week 9's framework arm. Same shape as `agents`/`mem0`: nothing on the path
+# that answers a question imports either package -- tests/test_no_framework_
+# imports.py fails the build if that changes. mcp_client.py uses the
+# low-level `mcp` SDK (so the raw JSON-RPC handshake stays visible);
+# mcp_server.py builds on `fastmcp`, which depends on `mcp` itself, so both
+# are listed for clarity even though installing one pulls the other.
+mcp = ["mcp>=2.2.0", "fastmcp>=4.0.0"]
 
 [project.scripts]
 rag-app = "rag_app.cli:main"

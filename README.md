@@ -104,6 +104,8 @@ genuinely easier without a browser:
 | `atasks [--generate] [--snapshot L] [--note T]` | Trajectory-level agent evaluation. |
 | `redteam --build-index` | Build the attack index. Never touches `data/tickets`. |
 | `redteam [--arm defended\|undefended\|both]` | Run the injection suite and diff the arms. |
+| `mcp-serve [--transport stdio\|http] [--port N]` | Run this app's own MCP server (`search_documents`). |
+| `agent "..." [--mcp-stdio\|--mcp-command CMD\|--mcp-url URL] [--mcp-allow]` | Discover tools over MCP instead of hard-coding them. |
 
 **`eval` with no flags costs nothing.** Every scorer that calls an LLM has to be
 typed, requires `--generate`, prints its call estimate before the first request,
@@ -483,10 +485,51 @@ That file also maps this app against the **OWASP LLM Top 10** — the six items 
 genuinely touches, with the code path for each, and why the other four are out of
 scope rather than silently skipped.
 
+## 16. MCP: discovery instead of hard-coding
+
+Every tool up to this point is wired in by hand: `tools.build_registry()` reads
+`cfg.agent.tools` and constructs each `Tool` itself. MCP inverts that — the
+agent connects to a server and calls `list_tools()`, so a tool can be added to
+the *server* with no change to the agent at all.
+
+[mcp_server.py](src/rag_app/mcp_server.py) exposes exactly one capability,
+`search_documents`, and it is a thin wrapper around the SAME
+`tools.make_search_documents` every other arm uses — not a second
+implementation of the score gate. [mcp_client.py](src/rag_app/mcp_client.py)
+is the agent side: a low-level `mcp.ClientSession` (so the raw JSON-RPC
+handshake stays visible, per the exercise's own goal, rather than hidden
+behind `fastmcp`'s client convenience layer) driven from a background thread
+that owns one asyncio event loop for the life of the connection — the
+synchronous ReAct loop calls `Tool.run(argument)` once per step, and a fresh
+`asyncio.run()` per call would mean reconnecting, and for a stdio server
+respawning the whole subprocess, on every single step.
+
+**A discovered tool gets a capability grade no other tool can earn by
+accident.** Week 8's `Tool.capability` grades what an in-process tool may
+reach; MCP gives no such grading at all, so every discovered tool is tagged
+`READ_EXTERNAL`, granted only when the CLI is passed `--mcp-allow`. Without
+it the tool is still listed in the prompt — hiding it would just trade an
+honest "not available" for a model finding out the tool exists and getting
+"unknown tool" instead — but every call to it is denied, which is what makes
+"checked a tool before trusting it" a measurable trace rather than a claim.
+
+```bash
+python -m rag_app mcp-serve --transport stdio          # your own server
+python -m rag_app agent "..." --mcp-stdio               # discover + list, denied
+python -m rag_app agent "..." --mcp-stdio --mcp-allow   # discover + actually call
+python -m rag_app mcp-serve --transport http --port 8765   # reachable by someone else's agent
+```
+
+Same framework-boundary shape as Week 7's LangGraph arm:
+`tests/test_no_framework_imports.py` fails the build if `mcp` or `fastmcp`
+reaches the path that answers a question, and both modules stay importable —
+so the CLI can offer `--mcp-stdio` and reject it politely — on a machine
+where `pip install -e ".[mcp]"` was never run.
+
 ## Testing
 
 ```bash
-python -m pytest -q              # 656 tests, 1 skipped, ~5s
+python -m pytest -q              # 687 tests, 1 skipped, ~7s
 python -m pytest tests/test_grounding.py -q
 ```
 

@@ -23,7 +23,7 @@ How the venv got fixed, in case it recurs: `pyvenv.cfg` pointed at a `home =` in
 ## Commands
 
 ```bash
-python -m pytest -q                    # 656 passed, 1 skipped, ~5s — real embedded Qdrant per test
+python -m pytest -q                    # 687 passed, 1 skipped, ~7s — real embedded Qdrant per test
 python -m pytest tests/test_grounding.py -q            # the four grounding guarantees
 python -m pytest tests/test_pdfs.py tests/test_explain.py -q   # PDF loading + UI introspection
 
@@ -42,6 +42,8 @@ python -m rag_app arena [--arms workflow,agent] [--generate]   # workflow vs age
 python -m rag_app atasks [--tasks PATH] [--generate] [--snapshot L] [--note T]
 python -m rag_app redteam --build-index                # build the SEPARATE attack index
 python -m rag_app redteam [--arm defended|undefended|both] [--generate]
+python -m rag_app mcp-serve [--transport stdio|http] [--port N]   # this app's own MCP server
+python -m rag_app agent "..." --mcp-stdio [--mcp-allow]           # discover tools over MCP
 ```
 
 **`eval` with no flags makes zero LLM calls, and always will.** The substring
@@ -67,17 +69,20 @@ question → embed → [dense top-K | dense+BM25 fused by RRF] → cross-encoder
 
 **Plain Python is the backbone; the frameworks are a labelled exhibit.** The
 retrieval pipeline, the CLI, the UI and the entire offline suite import no
-LangChain, LangGraph, LlamaIndex or mem0 — `tests/test_no_framework_imports.py`
-fails the build if that stops being true. What changed in Week 7 is that
+LangChain, LangGraph, LlamaIndex, mem0, mcp or fastmcp —
+`tests/test_no_framework_imports.py` fails the build if that stops being
+true. What changed in Week 7 is that
 [agent_langgraph.py](src/rag_app/agent_langgraph.py) and
 [memory_mem0.py](src/rag_app/memory_mem0.py) exist as a deliberate side-by-side
 comparison against `agent.py`/`memory.py`: **same tools, same prompt, same
 grounding gate**, different control flow and different memory machinery, so each
-framework's cost is measurable rather than asserted. They sit behind
-`pip install -e ".[agents]"` / `".[mem0]"`, import lazily inside function bodies,
-and nothing on the path that answers a question imports them. The old rule was
-"no frameworks anywhere"; the rule now is **"no frameworks on the path that
-answers a question."** The Streamlit UI ([ui.py](src/rag_app/ui.py)) is the primary surface, but it is a *second surface over the same `ask()`*, never a second implementation — and `ask`/`chunks`/`models` still run with streamlit uninstalled. Qdrant is the only vector store; there is no in-process numpy fallback.
+framework's cost is measurable rather than asserted. Week 9 adds
+[mcp_server.py](src/rag_app/mcp_server.py) and
+[mcp_client.py](src/rag_app/mcp_client.py) on the same terms. All four sit
+behind `pip install -e ".[agents]"` / `".[mem0]"` / `".[mcp]"`, import lazily
+inside function bodies, and nothing on the path that answers a question
+imports any of them. The old rule was "no frameworks anywhere"; the rule now
+is **"no frameworks on the path that answers a question."** The Streamlit UI ([ui.py](src/rag_app/ui.py)) is the primary surface, but it is a *second surface over the same `ask()`*, never a second implementation — and `ask`/`chunks`/`models` still run with streamlit uninstalled. Qdrant is the only vector store; there is no in-process numpy fallback.
 
 **A structured `.jsonl` ticket corpus used to be the point of this app and is now gone**, along with `tickets.py`, the three chunk strategies, `evaluate.py`/`GOLD`, `sampling.py`, `traces.py` and `repl.py`. What remains is documents and PDFs. If you find a comment referring to tickets, ticket ids or chunking strategies, it is stale — `git log` has the old code if a measurement harness is ever wanted back.
 
@@ -494,6 +499,103 @@ citations 14.3% -> 0%. The three survivors are entries 1-4 of
 `data/redteam/RESIDUAL-RISK.md`, which is a tracked artifact and part of the
 deliverable rather than a disclaimer.
 
+### MCP: discovery instead of hard-coding, and a server this app owns
+
+Every tool up to Week 8 is wired in by hand — `tools.build_registry()` reads
+`cfg.agent.tools` and constructs each `Tool` itself, so adding a tool means
+editing the agent's own code. MCP inverts that: the agent connects to a
+server and calls `list_tools()`, so a tool can be added on the SERVER side
+with zero change to the agent.
+
+**[mcp_server.py](src/rag_app/mcp_server.py) exposes exactly one capability,
+`search_documents`, and it does not reimplement it.** The MCP tool is a thin
+wrapper around the SAME `tools.make_search_documents(...).run` every other
+arm already uses — writing a second retrieval path here would put the score
+gate in two places, and Week 8's whole `_evidence_from` story is that a
+divergence like that is exactly how a vulnerability gets in.
+`read_source`/`list_sources` are deliberately NOT exposed: `read_source` is
+the exfiltration primitive Week 8 put an allowlist around, and handing it to
+an arbitrary remote caller is a product decision this exercise does not make
+for you.
+
+**[mcp_client.py](src/rag_app/mcp_client.py) uses the low-level `mcp`
+SDK, not `fastmcp`'s client convenience layer** — a deliberate choice so the
+raw JSON-RPC handshake stays visible, which the syllabus asks for directly
+("look at the raw messages once, so MCP stops being a mystery"). The server
+side uses `fastmcp`, because building one by hand against the low-level SDK
+buys nothing here — the interesting part of *building* a server is the tool
+you expose, not the protocol plumbing.
+
+**Why a background thread owns one event loop for the life of the
+connection, and not `asyncio.run()` per call.** `run_agent`'s loop is
+synchronous and calls `tools.invoke(name, argument)` once per step. MCP's
+transport and `ClientSession` are tied to the event loop that created them, so
+a fresh `asyncio.run()` on every step would mean reconnecting — and for a
+stdio server, respawning the whole subprocess — every single step.
+`MCPConnection` instead runs one event loop in a background thread for as
+long as the connection is open, and `call_tool` is a plain blocking function
+that schedules a coroutine onto that loop and waits for the result. Verified
+end to end against both an in-memory server (the test suite, via
+`mcp.shared.memory.create_client_server_memory_streams` driving FastMCP's
+`_mcp_server.run()` directly — real protocol, no subprocess) and a real
+stdio subprocess (`python -m rag_app mcp-serve`) before being written down
+here.
+
+**A discovered tool gets a capability grade no other tool can earn by
+accident.** Week 8's `Tool.capability` grades what an in-process tool may
+reach (`READ_INDEX` / `READ_DOCUMENT`), and `build_registry` decides the
+grant. MCP gives no such grading at all — a remote server can call itself
+anything and describe itself however it likes — so `mcp_client.
+discover_mcp_tools` tags every discovered tool `READ_EXTERNAL`, and
+`build_mcp_registry` grants it only when the caller passes `allow=True`
+(the CLI's `--mcp-allow`). Without it the tool is still ADVERTISED in the
+prompt — hiding it would just trade an honest "not available" for the model
+finding out anyway and getting "unknown tool" instead — but every call is
+denied, which is what turns "checked a tool before trusting it" into a
+measurable trace instead of a one-off claim. `ToolRegistry.labels_fn` is now
+a public property for exactly this composition: `build_mcp_registry` builds a
+FRESH registry (never mutates the caller's) carrying the same store-backed
+label resolver forward, so `search_documents` stays citation-verified even
+when it is reached through the combined registry.
+
+**One string in, one string out is the ReAct loop's whole action format, and
+an MCP tool can declare any JSON schema it wants.** `mcp_client.
+_build_arguments` bridges the two: valid JSON that decodes to an object is
+used as-is (the escape hatch for a tool needing several fields), a schema
+with exactly one property maps the raw Action Input string onto it (coercing
+int/float/bool when the schema says so — this is what makes `search_documents`,
+one `query` string, work with no special-casing), and anything more
+ambiguous returns an observation explaining why rather than guessing.
+
+Same framework-boundary discipline as Week 7's LangGraph arm: `mcp` and
+`fastmcp` are added to `test_no_framework_imports.py`'s `FRAMEWORK_PREFIXES`,
+and `mcp_server.py`/`mcp_client.py` join the `EXEMPT_MODULES` list — both
+import their package lazily inside function bodies behind a `_require()`, so
+the CLI can offer `--mcp-stdio`/`mcp-serve` and reject them politely on a
+machine where `pip install -e ".[mcp]"` was never run.
+
+```bash
+python -m rag_app mcp-serve --transport stdio           # this app's own server
+python -m rag_app agent "..." --mcp-stdio                # discover, list, every call DENIED
+python -m rag_app agent "..." --mcp-stdio --mcp-allow    # discover, and actually call
+python -m rag_app mcp-serve --transport http --port 8765 # reachable by someone else's agent
+python -m rag_app agent "..." --mcp-command "python other_server.py" --mcp-allow
+```
+
+Verified live, not just by the offline suite: `mcp-serve` spawned as a real
+subprocess over stdio, discovered by a real `mcp_client.MCPConnection`, against
+the real `bge-small` embedder, the real cross-encoder and the real embedded
+Qdrant index — returned `[RAG-Test-Document-1.pdf]`-labelled excerpts
+containing "cached credentials" for the same question `data/gold.yaml`
+expects it to answer. No LLM call in that path, so it cost nothing.
+
+**What is out of scope, on purpose.** No resource or prompt primitives (MCP
+has both; this server exposes only a tool, because that is what
+`search_documents` already is). No auth on the HTTP transport — `--mcp-url`
+is for a server you already trust the network path to, not a public
+endpoint. No multi-agent/A2A: the module title mentions it, but the graded
+task and the Friday mentor check are entirely MCP.
+
 ### MMR, query rewriting and HyDE are built and OFF by default
 
 Three optional stages, each a real change to what the model reads:
@@ -544,8 +646,8 @@ Swapping the model is a `config.yaml` edit plus a re-ingest. `StoreMeta.assert_c
 
 ### The test suite pays a real, measured cost for testing the real backend
 
-Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **656 passed, 1 skipped in ~5s** (measured, Python 3.14.7, with both optional
-extras installed; the skip is the without-langgraph branch).
+Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **687 passed, 1 skipped in ~7s** (measured, Python 3.14.7, with all three
+optional extras installed — `agents`, `mem0`, `mcp`; the skip is the without-langgraph branch, inverted for a test that only makes sense when the extra IS present).
 
 Still fully offline (no network, no model download) and fast enough to run on every change, just no longer near-instant. If a test needs to reopen a store it just built (proving a fix like the one above), it must explicitly `.close()` the first handle first — embedded mode holds a real file lock.
 

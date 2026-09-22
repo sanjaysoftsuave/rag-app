@@ -47,11 +47,17 @@ CORE_MODULES = (
     "rag_app.agent_eval",
 )
 
-FRAMEWORK_PREFIXES = ("langchain", "langgraph", "llama_index", "mem0")
+FRAMEWORK_PREFIXES = ("langchain", "langgraph", "llama_index", "mem0", "mcp", "fastmcp")
 
-# The two modules allowed to name a framework. They are the exhibit, not the
-# backbone: both import lazily, inside function bodies, behind a _require().
-EXEMPT_MODULES = ("rag_app.agent_langgraph", "rag_app.memory_mem0")
+# The modules allowed to name a framework. They are the exhibit, not the
+# backbone: all of them import lazily, inside function bodies, behind a
+# _require().
+EXEMPT_MODULES = (
+    "rag_app.agent_langgraph",
+    "rag_app.memory_mem0",
+    "rag_app.mcp_server",
+    "rag_app.mcp_client",
+)
 
 _PROBE = """
 import importlib, sys, json

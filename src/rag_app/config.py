@@ -127,7 +127,14 @@ class AgentMemoryConfig:
 # property; the vocabulary is just how it is expressed.
 READ_INDEX = "read:index"        # search, see labels, see excerpts
 READ_DOCUMENT = "read:document"  # pull one whole document end to end
-CAPABILITIES = (READ_INDEX, READ_DOCUMENT)
+# Week 9: a tool discovered over MCP. Sharper than the other two grades — an
+# MCP tool arrives with no capability annotation from the protocol AT ALL, so
+# every discovered tool is tagged READ_EXTERNAL regardless of what it actually
+# does, and mcp_client.build_mcp_registry grants it only when the CLI is
+# passed --mcp-allow. Registering it here (so Tool.register accepts it) is not
+# the same as granting it — see build_mcp_registry's docstring.
+READ_EXTERNAL = "read:external"
+CAPABILITIES = (READ_INDEX, READ_DOCUMENT, READ_EXTERNAL)
 
 
 @dataclass(frozen=True)
