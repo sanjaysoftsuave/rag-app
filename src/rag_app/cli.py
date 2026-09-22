@@ -17,6 +17,7 @@ browser, or needed to launch one:
   arena    the same questions through ask() and through the agent
   atasks   trajectory-level agent evaluation against data/agent_tasks.yaml
   redteam  run the injection suite against a separate attack index
+  mcp-serve  run this app's own MCP server (search_documents, over stdio or HTTP)
 
 Ingest deliberately has no CLI command: building the index is a UI action, so
 there is one place it happens rather than two that can drift apart.
@@ -161,6 +162,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", default="default", help="Memory session id")
     p.add_argument("--json", action="store_true", help="Machine-readable trajectory")
     p.add_argument("--quiet", action="store_true", help="Hide the trajectory")
+    mcp_source = p.add_mutually_exclusive_group()
+    mcp_source.add_argument(
+        "--mcp-stdio", action="store_true",
+        help="Discover tools from this app's own MCP server, spawned over stdio",
+    )
+    mcp_source.add_argument(
+        "--mcp-command", default=None, metavar="CMD",
+        help='Discover tools from another MCP server over stdio, e.g. --mcp-command "python other_server.py"',
+    )
+    mcp_source.add_argument(
+        "--mcp-url", default=None, metavar="URL",
+        help="Discover tools from an MCP server over streamable HTTP",
+    )
+    p.add_argument(
+        "--mcp-allow", action="store_true",
+        help="Grant discovered MCP tools the read:external capability "
+             "(default: listed in the prompt, but every call is denied)",
+    )
 
     p = sub.add_parser(
         "arena",
@@ -208,6 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="Machine-readable summary")
     p.add_argument("--snapshot", default=None, metavar="LABEL")
     p.add_argument("--note", default=None, metavar="TEXT")
+
+    p = sub.add_parser(
+        "mcp-serve",
+        help="Run this app's own MCP server, exposing search_documents",
+    )
+    p.add_argument("--preset", default=None)
+    p.add_argument("--transport", default="stdio", choices=["stdio", "http", "streamable-http"])
+    p.add_argument("--host", default="127.0.0.1", help="HTTP transport only")
+    p.add_argument("--port", type=int, default=8765, help="HTTP transport only")
 
     return parser
 
@@ -521,6 +549,48 @@ def _resolve_runner(impl: str):
     return run_agent
 
 
+def _attach_mcp_tools(args, cfg, tools):
+    """Discover tools over MCP and merge them into `tools`, if `--mcp-*` was
+    passed. Returns (tools, mcp_conn) — `mcp_conn` is None when no MCP flag
+    was given, and must be __exit__'d by the caller once the run is done.
+    """
+    if not (args.mcp_stdio or args.mcp_command or args.mcp_url):
+        return tools, None
+
+    from rag_app.mcp_client import (
+        EXTRA_HINT,
+        MCPConnection,
+        available,
+        build_mcp_registry,
+        discover_mcp_tools,
+        http_connect,
+        stdio_connect,
+    )
+
+    if not available():
+        raise RuntimeError(EXTRA_HINT)
+
+    if args.mcp_url:
+        connect = http_connect(args.mcp_url)
+    else:
+        command = args.mcp_command or (
+            f"{sys.executable} -m rag_app mcp-serve --preset {args.preset or cfg.default_preset}"
+        )
+        parts = command.split()
+        connect = stdio_connect(parts[0], parts[1:])
+
+    conn = MCPConnection(connect)
+    conn.__enter__()
+    discovered = discover_mcp_tools(conn)
+    combined = build_mcp_registry(tools, discovered, allow=args.mcp_allow)
+    print(
+        f"MCP: discovered {len(discovered)} tool(s): {', '.join(t.name for t in discovered) or '(none)'}"
+        + ("" if args.mcp_allow else " (listed, not yet trusted — pass --mcp-allow to call them)"),
+        file=sys.stderr,
+    )
+    return combined, conn
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     import json as _json
 
@@ -530,6 +600,13 @@ def cmd_agent(args: argparse.Namespace) -> int:
         store, embedder, _, tools = _agent_context(cfg, args.preset)
     except (FileNotFoundError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        tools, mcp_conn = _attach_mcp_tools(args, cfg, tools)
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        store.close()
         return 1
 
     memory = None
@@ -551,6 +628,8 @@ def cmd_agent(args: argparse.Namespace) -> int:
     finally:
         if memory is not None:
             memory.close()
+        if mcp_conn is not None:
+            mcp_conn.__exit__(None, None, None)
         store.close()
 
     if args.json:
@@ -782,6 +861,22 @@ def cmd_redteam(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp_serve(args: argparse.Namespace) -> int:
+    from rag_app.mcp_server import EXTRA_HINT, available, serve
+
+    if not available():
+        print(EXTRA_HINT, file=sys.stderr)
+        return 1
+
+    cfg = load_config()
+    try:
+        serve(cfg, preset=args.preset, transport=args.transport, host=args.host, port=args.port)
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     cfg = load_config()
     flt = MetaFilter.parse(args.filter)
@@ -915,6 +1010,7 @@ _HANDLERS = {
     "arena": cmd_arena,
     "atasks": cmd_atasks,
     "redteam": cmd_redteam,
+    "mcp-serve": cmd_mcp_serve,
 }
 
 

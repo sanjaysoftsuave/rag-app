@@ -95,6 +95,17 @@ class ToolRegistry:
         self._denied = tuple(denied)
         self._granted = tuple(granted)
 
+    @property
+    def labels_fn(self):
+        """The label resolver this registry was built with, or None.
+
+        Public so a module composing a NEW registry over the same store (Week
+        9's `mcp_client.build_mcp_registry`) can carry the same verification
+        forward instead of silently falling back to the citable_labels()
+        fail-open.
+        """
+        return self._labels_fn
+
     def citable_labels(self) -> frozenset[str] | None:
         """The labels a tool in this registry could legitimately have printed.
 

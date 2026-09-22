@@ -178,3 +178,59 @@ def test_eval_snapshot_without_generate_is_still_legitimate():
     from rag_app.cli import check_eval_args
 
     assert check_eval_args(build_parser().parse_args(["eval", "--snapshot", "x"])) is None
+
+
+# ---------------------------------------------------------------------------
+# Week 9: MCP discovery and this app's own server
+# ---------------------------------------------------------------------------
+
+
+def test_agent_mcp_flags_default_off():
+    a = build_parser().parse_args(["agent", "q"])
+    assert a.mcp_stdio is False
+    assert a.mcp_command is None
+    assert a.mcp_url is None
+    assert a.mcp_allow is False
+
+
+def test_agent_mcp_sources_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["agent", "q", "--mcp-stdio", "--mcp-url", "http://x"])
+
+
+def test_agent_mcp_command_takes_a_command_line():
+    a = build_parser().parse_args(["agent", "q", "--mcp-command", "python other_server.py"])
+    assert a.mcp_command == "python other_server.py"
+
+
+def test_mcp_serve_defaults_to_stdio():
+    a = build_parser().parse_args(["mcp-serve"])
+    assert a.transport == "stdio"
+    assert a.preset is None
+    assert a.port == 8765
+
+
+def test_mcp_serve_rejects_an_unknown_transport():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["mcp-serve", "--transport", "carrier-pigeon"])
+
+
+def test_attach_mcp_tools_is_a_noop_without_any_mcp_flag():
+    from rag_app.cli import _attach_mcp_tools
+    from rag_app.tools import ToolRegistry
+
+    args = build_parser().parse_args(["agent", "q"])
+    tools = ToolRegistry()
+    result, conn = _attach_mcp_tools(args, None, tools)
+    assert result is tools
+    assert conn is None
+
+
+def test_attach_mcp_tools_explains_the_missing_extra(monkeypatch):
+    import rag_app.mcp_client as mcp_client
+    from rag_app.cli import _attach_mcp_tools
+
+    monkeypatch.setattr(mcp_client, "available", lambda: False)
+    args = build_parser().parse_args(["agent", "q", "--mcp-stdio"])
+    with pytest.raises(RuntimeError, match="pip install"):
+        _attach_mcp_tools(args, None, None)
