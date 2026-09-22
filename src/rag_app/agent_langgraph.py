@@ -206,7 +206,8 @@ def build_graph(cfg: AppConfig, tools: ToolRegistry, *, llm_fn=None, clock=None)
 
         observation = tool.run(action.tool_input)
         budget.tool_calls += 1
-        evidence.extend(_evidence_from(observation, tools))
+        got, _planted = _evidence_from(observation, tools)
+        evidence.extend(got)
         steps.append(
             Step(len(steps) + 1, action.thought, action.tool, action.tool_input,
                  observation, True)
@@ -218,15 +219,26 @@ def build_graph(cfg: AppConfig, tools: ToolRegistry, *, llm_fn=None, clock=None)
 
     def route(state: AgentState) -> str:
         """Termination lives here rather than in a readable `while`. This is
-        precisely the readability cost the module docstring names."""
+        precisely the readability cost the module docstring names.
+
+        The router deliberately does NOT check the budget itself. `think`
+        already checks it at its top, exactly where the plain loop checks at the
+        top of each iteration — and an extra check here changed BEHAVIOUR, not
+        just bookkeeping: it ended the run between a successful `think` and its
+        `act`, so a budget-stopped graph run performed one fewer tool call than
+        the identical plain run on the identical script.
+
+        That was invisible while the parity test only covered the happy path.
+        The equivalence this module claims ("same tools, same prompt, same gate,
+        only the control flow differs") is worth exactly as much as the tests
+        that pin it, so the budget is checked in one place per arm and
+        `test_both_implementations_agree_on_cost_after_a_budget_stop` holds it
+        there.
+        """
         if state.get("stop_reason"):
             return END
         action = state.get("action")
         if action is not None and action.is_final:
-            return END
-        trip = budget.check()
-        if trip:
-            state["stop_reason"], state["stop_detail"] = trip
             return END
         return "act"
 

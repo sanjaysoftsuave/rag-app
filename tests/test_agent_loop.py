@@ -355,3 +355,75 @@ def test_an_uncited_answer_falls_back_to_the_evidence_and_records_it():
     out = finalize("q", "answer with no citation", evidence, r)
     assert out.sources == ["doc.pdf"]
     assert out.meta["cited"] is False
+
+
+# ---------------------------------------------------------------------------
+# Cost accounting on every exit path (BUG 3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_budget_stop_still_reports_what_it_spent(tmp_path):
+    """Three of six exits used to skip accounting, so the trajectories that
+    spent the MOST reported spending nothing — and a p99, which below 100 tasks
+    is just the maximum, would have been drawn from exactly those runs."""
+    cfg = make_config(tmp_path)
+    llm = scripted_llm(*[turn("search_documents", f"q{i}") for i in range(10)])
+    r = run_agent("q?", cfg, tools=static_tool(), llm_fn=llm, max_steps=3)
+    assert r.stop_reason == "max-steps"
+    assert len(r.steps) == 3
+    assert r.llm_calls == 3          # was 0
+    assert r.tool_calls == 3         # was 0
+    assert r.elapsed_s >= 0.0
+
+
+def test_a_prompt_budget_stop_reports_zero_because_nothing_was_spent(tmp_path):
+    """The one case where zero is the honest number: the budget is checked
+    BEFORE the call, so an over-budget prompt really did cost nothing."""
+    from dataclasses import replace
+
+    cfg = make_config(tmp_path)
+    cfg = replace(cfg, agent=replace(cfg.agent, max_prompt_chars=10))
+    r = run_agent("q?", cfg, tools=static_tool(), llm_fn=scripted_llm("unused"))
+    assert r.stop_reason == "token-budget"
+    assert r.llm_calls == 0
+    assert r.steps == []
+
+
+def test_an_llm_error_reports_the_calls_made_before_it(tmp_path):
+    cfg = make_config(tmp_path)
+
+    class Flaky:
+        def __init__(self):
+            self.n = 0
+
+        def __call__(self, messages, config):
+            self.n += 1
+            if self.n > 2:
+                raise RuntimeError("the API is down")
+            return turn("search_documents", f"q{self.n}")
+
+    r = run_agent("q?", cfg, tools=static_tool(), llm_fn=Flaky())
+    assert r.stop_reason == "llm-error"
+    assert r.llm_calls == 2
+    assert r.tool_calls == 2
+
+
+def test_every_stop_reason_is_classified_exactly_once():
+    """A 12th stop reason added without classifying it fails the build rather
+    than being silently mis-scored by every metric that reads these sets."""
+    from rag_app.agent import BUDGET_STOPS, REFUSAL_STOPS, SELF_TERMINATED, STOP_REASONS
+
+    assert len(STOP_REASONS) == len(set(STOP_REASONS))
+    assert REFUSAL_STOPS | BUDGET_STOPS | {"final-answer"} == set(STOP_REASONS)
+    assert not (REFUSAL_STOPS & BUDGET_STOPS)
+    assert "final-answer" not in REFUSAL_STOPS and "final-answer" not in BUDGET_STOPS
+    assert SELF_TERMINATED == REFUSAL_STOPS | {"final-answer"}
+
+
+def test_a_refusal_is_a_decision_and_a_budget_trip_is_an_exhaustion():
+    from rag_app.agent import BUDGET_STOPS, REFUSAL_STOPS
+
+    assert "no-evidence" in REFUSAL_STOPS and "model-refused" in REFUSAL_STOPS
+    for reason in ("max-steps", "wall-clock", "unparseable", "repeated-action",
+                   "max-tool-calls", "token-budget", "max-llm-calls", "llm-error"):
+        assert reason in BUDGET_STOPS

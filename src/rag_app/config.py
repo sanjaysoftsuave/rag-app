@@ -119,6 +119,40 @@ class AgentMemoryConfig:
     vector_recall_k: int = 3
 
 
+# What a tool is allowed to reach. Two read grades and NO write grade, because
+# this app has nothing to write — every tool reads an already-built index.
+#
+# The value of the field today is not the list: it is that a tool added later
+# gets no grant by default and is therefore DENIED. Default-deny is the
+# property; the vocabulary is just how it is expressed.
+READ_INDEX = "read:index"        # search, see labels, see excerpts
+READ_DOCUMENT = "read:document"  # pull one whole document end to end
+CAPABILITIES = (READ_INDEX, READ_DOCUMENT)
+
+
+@dataclass(frozen=True)
+class DefenceConfig:
+    """The injection defences, each switchable so the A/B is a measured delta.
+
+    Every one defaults ON. The undefended arm exists to answer "what did this
+    buy?" without checking out a previous commit — which is the difference
+    between a measurement and an assertion.
+
+    They are layered on purpose, because each covers what the others miss:
+    delimiters and DATA_BOUNDARY tell the model what is data; `neutralize`
+    removes the imperative a model might obey anyway; `verify_evidence` refuses
+    a citation the store cannot vouch for; and `forged_citation_gate` throws
+    away an answer that cited one regardless.
+    """
+
+    neutralize: bool = True
+    verify_evidence: bool = True
+    data_delimiters: bool = True
+    enforce_capabilities: bool = True
+    forged_citation_gate: bool = True
+    question_scan: bool = True
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     """The ReAct loop's budgets and tool set.
@@ -148,7 +182,12 @@ class AgentConfig:
     repeat_action_limit: int = 2
     max_observation_chars: int = 2000
     tools: tuple[str, ...] = BUILTIN_TOOL_NAMES
+    # Which documents read_source may open. () means unrestricted - and the
+    # tool's own description says so, because a scope that silently is not one
+    # is worse than no scope at all.
+    read_source_allow: tuple[str, ...] = ()
     memory: AgentMemoryConfig = AgentMemoryConfig()
+    defences: DefenceConfig = DefenceConfig()
 
 
 @dataclass(frozen=True)
@@ -339,6 +378,14 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"summary_trigger_chars ({summary_trigger}); otherwise summarizing never "
             f"shrinks the buffer and the trigger fires on every turn."
         )
+    d_raw = a_raw.get("defences") or {}
+    for key in d_raw:
+        if key not in DefenceConfig.__dataclass_fields__:
+            raise ValueError(
+                f"agent.defences has unknown switch {key!r}; the legal ones are "
+                f"{sorted(DefenceConfig.__dataclass_fields__)}. A misspelt switch "
+                f"would silently leave that defence ON while you believed it off."
+            )
     tool_names = tuple(a_raw.get("tools", BUILTIN_TOOL_NAMES))
     unknown = [t for t in tool_names if t not in BUILTIN_TOOL_NAMES]
     if unknown:
@@ -394,6 +441,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             repeat_action_limit=int(a_raw.get("repeat_action_limit", 2)),
             max_observation_chars=int(a_raw.get("max_observation_chars", 2000)),
             tools=tool_names,
+            read_source_allow=tuple(a_raw.get("read_source_allow", ()) or ()),
+            defences=DefenceConfig(
+                **{k: bool(v) for k, v in d_raw.items()}
+            ),
             memory=AgentMemoryConfig(
                 enabled=bool(m_raw.get("enabled", False)),
                 backend=memory_backend,

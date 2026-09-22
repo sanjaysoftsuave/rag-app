@@ -139,3 +139,42 @@ def test_judge_flags_and_defaults():
     a = build_parser().parse_args(["judge"])
     assert a.init is False and a.json is False
     assert a.traces is None and a.labels is None
+
+
+def test_atasks_snapshot_takes_a_label_and_a_note():
+    a = build_parser().parse_args(["atasks", "--snapshot", "before", "--note", "why"])
+    assert a.snapshot == "before"
+    assert a.note == "why"
+    assert build_parser().parse_args(["atasks"]).snapshot is None
+
+
+def test_atasks_snapshot_requires_generate_and_says_why():
+    """A dry run stops every task 'unparseable', so snapshotting it would record
+    the harness's shape as if it were the agent's behaviour."""
+    from rag_app.cli import check_atasks_args
+
+    msg = check_atasks_args(build_parser().parse_args(["atasks", "--snapshot", "x"]))
+    assert msg is not None
+    assert "--generate" in msg
+    assert "harness's shape" in msg
+
+
+def test_atasks_snapshot_with_generate_is_accepted():
+    from rag_app.cli import check_atasks_args
+
+    assert check_atasks_args(
+        build_parser().parse_args(["atasks", "--snapshot", "x", "--generate"])
+    ) is None
+
+
+def test_a_bare_atasks_run_needs_no_generate():
+    from rag_app.cli import check_atasks_args
+
+    assert check_atasks_args(build_parser().parse_args(["atasks"])) is None
+
+
+def test_eval_snapshot_without_generate_is_still_legitimate():
+    """Unlike atasks: the retrieval metrics cost nothing and are real."""
+    from rag_app.cli import check_eval_args
+
+    assert check_eval_args(build_parser().parse_args(["eval", "--snapshot", "x"])) is None

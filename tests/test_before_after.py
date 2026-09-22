@@ -176,3 +176,63 @@ def test_json_carries_the_deltas_and_the_warnings():
     assert payload["metrics"][0]["verdict"] == "better"
     assert payload["one_question_worth"] == pytest.approx(0.1111, abs=1e-3)
     assert payload["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# Week 8: agent and defence metrics
+# ---------------------------------------------------------------------------
+
+
+def test_the_defence_switches_are_recorded_or_the_ab_reports_no_change(tmp_path):
+    """Without these, a defended-vs-undefended comparison shows identical
+    settings and warns 'no configuration difference' on its own headline."""
+    from rag_app.redteam import undefended
+
+    cfg = make_config(tmp_path)
+    before = settings_of(undefended(cfg))
+    after = settings_of(cfg)
+    assert before["defences_neutralize"] is False
+    assert after["defences_neutralize"] is True
+
+    c = compare(snap("undefended", {"injection_success_rate": 0.71}, before),
+                snap("defended", {"injection_success_rate": 0.43}, after))
+    assert not any("no configuration difference" in w for w in c.warnings)
+    assert ("defences_neutralize", False, True) in c.changed_settings
+
+
+def test_an_injection_metric_reads_lower_as_better():
+    c = compare(snap("a", {"injection_success_rate": 0.71}),
+                snap("b", {"injection_success_rate": 0.43}))
+    row = next(r for r in c.rows if r.name == "injection_success_rate")
+    assert row.verdict == "better"
+
+
+def test_a_denial_count_has_no_direction_and_therefore_no_verdict():
+    """More denials is not inherently better: it may mean a nastier corpus or a
+    detector false-positiving on a clean one."""
+    c = compare(snap("a", {"denied_tool_calls": 0}), snap("b", {"denied_tool_calls": 9}))
+    assert next(r for r in c.rows if r.name == "denied_tool_calls").verdict == ""
+
+
+def test_wall_clock_has_no_direction():
+    c = compare(snap("a", {"mean_wall_clock_s": 1.0}), snap("b", {"mean_wall_clock_s": 2.0}))
+    assert next(r for r in c.rows if r.name == "mean_wall_clock_s").verdict == ""
+
+
+def test_wrong_answer_right_path_has_no_direction_and_therefore_no_verdict():
+    """A clean route that still failed points at the corpus or the task file,
+    not the agent. Driving it to zero is not obviously good."""
+    c = compare(snap("a", {"wrong_answer_right_path": 1}),
+                snap("b", {"wrong_answer_right_path": 0}))
+    assert next(r for r in c.rows if r.name == "wrong_answer_right_path").verdict == ""
+
+
+def test_a_run_note_records_a_code_change_settings_cannot_see(tmp_path):
+    """settings_of records CONFIGURATION; most real interventions are code."""
+    cfg = make_config(tmp_path)
+    s = make_snapshot("after", cfg, {"mrr": 0.9}, gold("a"), note="added DATA_BOUNDARY")
+    assert s.settings["run_note"] == "added DATA_BOUNDARY"
+
+    c = compare(make_snapshot("before", cfg, {"mrr": 0.5}, gold("a")), s)
+    assert ("run_note", None, "added DATA_BOUNDARY") in c.changed_settings
+    assert c.describe().index("WHAT CHANGED") < c.describe().index("WHAT IT BOUGHT")

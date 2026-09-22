@@ -75,10 +75,20 @@ class _Counter:
         return self.fn(*args, **kwargs)
 
 
-def _grade(gold, text: str, refused: bool) -> bool:
-    """Reuses the gold set's own rule, so both arms are graded identically."""
+def _grade(gold, text: str, refused: bool, stop_reason: str = "") -> bool:
+    """Reuses the gold set's own rule, so both arms are graded identically.
+
+    `stop_reason` is the agent-arm fix for the same bug `TaskResult.success`
+    had: `_stop()` marks every budget trip `refused=True`, so an agent that ran
+    out of steps on an unanswerable question was credited with a correct
+    refusal. The empty default means the workflow arm — whose gates are all
+    decisions (`no-candidates`, `below-threshold`, `model-refused`) — is
+    unaffected with no special case.
+    """
     if not gold.answerable:
-        return refused
+        from rag_app.agent import BUDGET_STOPS
+
+        return refused and stop_reason not in BUDGET_STOPS
     low = (text or "").lower()
     return all(s.lower() in low for s in gold.must_contain)
 
@@ -251,7 +261,7 @@ def compare_arms(
                     text=result.text,
                     sources=result.sources,
                     refused=result.refused,
-                    ok=_grade(question, result.text, result.refused),
+                    ok=_grade(question, result.text, result.refused, result.stop_reason),
                     llm_calls=result.llm_calls,
                     tool_calls=result.tool_calls,
                     steps=len(result.steps),

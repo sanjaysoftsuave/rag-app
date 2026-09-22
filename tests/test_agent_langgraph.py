@@ -111,3 +111,29 @@ def test_without_the_extra_the_error_names_the_install_command(tmp_path):
     cfg = make_config(tmp_path)
     with pytest.raises(RuntimeError, match="pip install"):
         run_agent_langgraph("q?", cfg, tools=registry(), llm_fn=scripted_llm("x"))
+
+
+@pytest.mark.skipif(find_spec("langgraph") is None, reason=pytestmark_reason)
+def test_both_implementations_agree_on_cost_after_a_budget_stop(tmp_path):
+    """The test that would have caught BUG 3.
+
+    The existing parity test only covers the happy path, and the plain loop
+    accounted correctly there. It was the BUDGET-stopped exits that skipped
+    accounting — so the two arms silently disagreed on exactly the runs that
+    cost the most, and nothing noticed.
+    """
+    cfg = make_config(tmp_path)
+    script = [turn("search_documents", f"q{i}") for i in range(10)]
+
+    plain = run_agent(
+        "q?", cfg, tools=registry(), llm_fn=scripted_llm(*script), max_steps=3
+    )
+    graph = run_agent_langgraph(
+        "q?", cfg, tools=registry(), llm_fn=scripted_llm(*script), max_steps=3
+    )
+
+    assert plain.stop_reason == graph.stop_reason
+    assert plain.llm_calls == graph.llm_calls
+    assert plain.tool_calls == graph.tool_calls
+    assert len(plain.steps) == len(graph.steps)
+    assert plain.llm_calls > 0, "a budget stop that spent nothing is the bug"

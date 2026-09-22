@@ -24,3 +24,8 @@ data/gold.yaml
 data/eval/
 data/agent_tasks.yaml
 data/agent_memory/
+
+# data/redteam/ is deliberately NOT ignored: the attack corpus is a committed
+# artifact, because an exercise nobody else can reproduce proves nothing.
+# Its derived index (data/store/redteam/) and its run numbers are not.
+data/redteam/eval/

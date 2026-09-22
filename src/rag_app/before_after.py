@@ -56,7 +56,61 @@ HIGHER_IS_BETTER: dict[str, bool] = {
     "ragas_answer_relevancy": True,
     "ragas_context_precision": True,
     "ragas_context_recall": True,
+    # ---- agent trajectory metrics -----------------------------------------
+    "task_success": True,
+    "tool_choice_accuracy": True,
+    "tool_sequence_accuracy": True,
+    "budget_adherence": True,
+    "no_evidence_rate": False,
+    "hallucinated_citation_rate": False,
+    "gap_rate": False,
+    "right_answer_wrong_path": False,
+    "stopped_on_budget": False,
+    "failures_loop": False,
+    "failures_wrong_tool": False,
+    "failures_wrong_sequence": False,
+    "failures_invented_input": False,
+    "failures_quiet_give_up": False,
+    "failures_budget_exhausted": False,
+    "failures_step_target_missed": False,
+    # Cost down is better ONLY read beside task_success: a mean that fell
+    # because the agent started refusing everything is not an improvement.
+    "mean_steps": False,
+    "p99_steps": False,
+    "mean_llm_calls": False,
+    "p99_llm_calls": False,
+    "mean_tool_calls": False,
+    "p99_tool_calls": False,
+    "mean_prompt_chars": False,
+    "p99_prompt_chars": False,
+    # ---- injection / defence metrics --------------------------------------
+    "injection_success_rate": False,
+    "forged_citation_rate": False,
+    "leak_rate": False,
+    "overreach_rate": False,
+    "false_refusal_rate": False,
+    "detector_false_positive_rate": False,
 }
+
+# Three more are DELIBERATELY absent for the same reason:
+#
+#   neutralized_spans / denied_tool_calls - more denials is not inherently
+#       better. A run that neutralized fifty spans may have met a nastier corpus
+#       or may be false-positiving on a clean one, and the map refuses to guess
+#       which.
+#
+# Two metrics are DELIBERATELY absent, and their absence is the point:
+#
+#   wrong_answer_right_path - a clean route that still failed points at the
+#       corpus or the task file, not at the agent. Driving it to zero is not
+#       obviously good, so this module refuses to say.
+#
+#   mean_wall_clock_s / p99_wall_clock_s - wall clock is machine- and
+#       network-dependent, so a verdict on it would be a claim about the laptop.
+#       Reported, never judged.
+#
+# Both render with an empty verdict, which is the honest answer rather than a
+# guessed direction.
 
 SNAPSHOT_DIRNAME = "eval"
 
@@ -110,6 +164,32 @@ def settings_of(cfg) -> dict[str, Any]:
         "mmr_lambda": cfg.retrieval.mmr_lambda,
         "llm_model": cfg.llm.model,
         "judge_model": cfg.evaluation.judge_model,
+        # Agent settings are recorded for EVERY snapshot, including retrieval
+        # ones that never run an agent — symmetrical with llm_model/judge_model,
+        # which are already recorded for runs that never call them. Without
+        # these, an agent-only change produces identical settings on both sides
+        # and `Comparison.warnings` reports "no configuration difference" on a
+        # run where something real changed.
+        "agent_implementation": cfg.agent.implementation,
+        "agent_max_steps": cfg.agent.max_steps,
+        "agent_max_tool_calls": cfg.agent.max_tool_calls,
+        "agent_max_llm_calls": cfg.agent.max_llm_calls,
+        "agent_max_prompt_chars": cfg.agent.max_prompt_chars,
+        "agent_max_observation_chars": cfg.agent.max_observation_chars,
+        "agent_repeat_action_limit": cfg.agent.repeat_action_limit,
+        "agent_tools": list(cfg.agent.tools),
+        "agent_memory_enabled": cfg.agent.memory.enabled,
+        # Without these a defended-vs-undefended run would show identical
+        # settings and `Comparison.warnings` would report "no configuration
+        # difference" on the A/B's own headline result - the tool lying about
+        # the thing it exists to measure.
+        "defences_neutralize": cfg.agent.defences.neutralize,
+        "defences_verify_evidence": cfg.agent.defences.verify_evidence,
+        "defences_data_delimiters": cfg.agent.defences.data_delimiters,
+        "defences_enforce_capabilities": cfg.agent.defences.enforce_capabilities,
+        "defences_forged_citation_gate": cfg.agent.defences.forged_citation_gate,
+        "defences_question_scan": cfg.agent.defences.question_scan,
+        "read_source_allow": list(cfg.agent.read_source_allow),
     }
 
 
@@ -130,12 +210,27 @@ class Snapshot:
         )
 
 
-def make_snapshot(label: str, cfg, metrics: dict, questions) -> Snapshot:
+def make_snapshot(
+    label: str, cfg, metrics: dict, questions, *, note: str = ""
+) -> Snapshot:
+    """`note` is the escape hatch for a CODE change.
+
+    `settings_of` records configuration, and most real interventions — a prompt
+    edit, a new gate, a scoring fix — are code and leave configuration
+    identical. Without a note, `compare` would print "no configuration
+    difference … any delta is run-to-run variation" on exactly the runs that
+    matter most. A note lands in settings as `run_note`, so `changed_settings`
+    prints the stated intervention FIRST — which is what this module demands:
+    a number with no stated cause is not a finding.
+    """
     answerable = sum(1 for q in questions if q.answerable)
+    settings = settings_of(cfg)
+    if note:
+        settings["run_note"] = note
     return Snapshot(
         label=label,
         created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        settings=settings_of(cfg),
+        settings=settings,
         metrics=dict(metrics),
         n_questions=len(questions),
         n_answerable=answerable,

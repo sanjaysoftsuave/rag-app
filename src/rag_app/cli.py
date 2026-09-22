@@ -16,6 +16,7 @@ browser, or needed to launch one:
   agent    answer one question with the ReAct loop, printing every step
   arena    the same questions through ask() and through the agent
   atasks   trajectory-level agent evaluation against data/agent_tasks.yaml
+  redteam  run the injection suite against a separate attack index
 
 Ingest deliberately has no CLI command: building the index is a UI action, so
 there is one place it happens rather than two that can drift apart.
@@ -100,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save the metrics to data/eval/LABEL.json for `compare`",
     )
     p.add_argument("--limit", type=int, default=0, help="Score only the first N questions")
+    p.add_argument(
+        "--note", default=None, metavar="TEXT",
+        help="What you changed. Recorded in the snapshot and printed first by `compare`",
+    )
 
     p = sub.add_parser(
         "debug",
@@ -179,8 +184,51 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--impl", default=None, choices=["plain", "langgraph"])
     p.add_argument("--generate", action="store_true", help="Actually call the LLM")
     p.add_argument("--json", action="store_true", help="Machine-readable summary")
+    p.add_argument(
+        "--snapshot", default=None, metavar="LABEL",
+        help="Save the metrics to data/eval/LABEL.json for `compare`",
+    )
+    p.add_argument(
+        "--note", default=None, metavar="TEXT",
+        help="What you changed. Recorded in the snapshot and printed first by `compare`",
+    )
+
+    p = sub.add_parser(
+        "redteam",
+        help="Run the injection suite against a SEPARATE attack index",
+    )
+    p.add_argument(
+        "--build-index", action="store_true",
+        help="Build the attack index from data/redteam/corpus (never touches data/tickets)",
+    )
+    p.add_argument("--arm", default="both", choices=["defended", "undefended", "both"])
+    p.add_argument("--attacks", default=None, help="Attack suite YAML")
+    p.add_argument("--preset", default=None)
+    p.add_argument("--generate", action="store_true", help="Actually call the LLM")
+    p.add_argument("--json", action="store_true", help="Machine-readable summary")
+    p.add_argument("--snapshot", default=None, metavar="LABEL")
+    p.add_argument("--note", default=None, metavar="TEXT")
 
     return parser
+
+
+def check_atasks_args(args) -> str | None:
+    """Return an error message, or None. Pure: no config, no I/O.
+
+    A separate function from `check_eval_args` because `eval --snapshot` without
+    `--generate` is legitimate — the retrieval metrics cost nothing and are real.
+    An agent dry run is not: every task stops `unparseable`, so the snapshot
+    would record the harness's shape as if it were the agent's behaviour, and a
+    later `compare` against it would be measuring nothing.
+    """
+    if getattr(args, "snapshot", None) and not getattr(args, "generate", False):
+        return (
+            "--snapshot saves a snapshot for `compare`, but without --generate no LLM is "
+            "called, so every task stops 'unparseable' and the snapshot would record the "
+            "harness's shape rather than the agent's behaviour. Add --generate, or drop "
+            "--snapshot."
+        )
+    return None
 
 
 def check_eval_args(args) -> str | None:
@@ -289,7 +337,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
         path = snapshot_path(cfg, args.snapshot)
         write_snapshot(
-            make_snapshot(args.snapshot, cfg, _json.loads(payload), gold), path
+            make_snapshot(
+                args.snapshot, cfg, _json.loads(payload), gold, note=args.note or ""
+            ),
+            path,
         )
         print(f"Snapshot written to {path}", file=sys.stderr)
     return 0
@@ -562,7 +613,18 @@ def cmd_arena(args: argparse.Namespace) -> int:
 def cmd_atasks(args: argparse.Namespace) -> int:
     from pathlib import Path
 
-    from rag_app.agent_eval import agent_report_to_json, evaluate_agent, load_agent_tasks
+    from rag_app.agent_eval import (
+        agent_metrics,
+        agent_gold_view,
+        agent_report_to_json,
+        evaluate_agent,
+        load_agent_tasks,
+    )
+
+    problem = check_atasks_args(args)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
 
     cfg = load_config()
     try:
@@ -593,6 +655,130 @@ def cmd_atasks(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(agent_report_to_json(report) if args.json else report.describe())
+
+    if args.snapshot:
+        # After the store is closed: embedded Qdrant holds a directory lock and
+        # the snapshot write must not happen inside the finally.
+        from rag_app.before_after import make_snapshot, snapshot_path, write_snapshot
+
+        path = snapshot_path(cfg, args.snapshot)
+        write_snapshot(
+            make_snapshot(
+                args.snapshot, cfg, agent_metrics(report), agent_gold_view(tasks),
+                note=args.note or "",
+            ),
+            path,
+        )
+        print(f"Snapshot written to {path}", file=sys.stderr)
+    return 0
+
+
+def cmd_redteam(args: argparse.Namespace) -> int:
+    from rag_app.redteam import (
+        attack_metrics,
+        obedient_llm,
+        attack_report_to_json,
+        build_redteam_index,
+        load_attacks,
+        redteam_config,
+        run_attacks,
+        undefended,
+    )
+
+    cfg = load_config()
+    rt_cfg = redteam_config(cfg)
+
+    if args.build_index:
+        # An ingest on the CLI, which this app otherwise forbids. It stays
+        # because it is STRUCTURALLY incapable of touching the real corpus -
+        # redteam_config redirects both tickets_dir and store_dir - and because
+        # requiring a UI click to build an ATTACK index would make the exercise
+        # unreproducible for anyone else.
+        try:
+            report = build_redteam_index(cfg, preset=args.preset)
+        except (ValueError, FileNotFoundError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(report.describe())
+        print(f"\nAttack index built at {rt_cfg.store_dir}", file=sys.stderr)
+        print(f"The real corpus at {cfg.tickets_dir} was not touched.", file=sys.stderr)
+        return 0
+
+    from pathlib import Path
+
+    try:
+        cases = load_attacks(cfg, Path(args.attacks) if args.attacks else None)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    arms = ["defended", "undefended"] if args.arm == "both" else [args.arm]
+    if not args.generate:
+        print(
+            f"dry run: a scripted stand-in drives the agent, so these rates measure the "
+            f"CODE, not the model. The real thing costs up to "
+            f"{len(cases) * len(arms) * cfg.agent.max_steps} calls. Pass --generate.",
+            file=sys.stderr,
+        )
+
+    reports = {}
+    for arm in arms:
+        arm_cfg = rt_cfg if arm == "defended" else undefended(rt_cfg)
+        try:
+            store, embedder, reranker, tools = _agent_context(arm_cfg, args.preset)
+        except (FileNotFoundError, RuntimeError) as exc:
+            print(
+                f"{exc}\n\nBuild the attack index first: "
+                f"python -m rag_app redteam --build-index",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            reports[arm] = run_attacks(
+                cases, arm_cfg, tools=tools, store=store,
+                llm_fn=None if args.generate else obedient_llm(cases),
+                profile=arm, generated=args.generate,
+            )
+        finally:
+            store.close()
+
+    if args.json:
+        import json as _json
+
+        print(_json.dumps(
+            {arm: _json.loads(attack_report_to_json(r)) for arm, r in reports.items()},
+            indent=2,
+        ))
+    else:
+        for arm, report in reports.items():
+            print(report.describe())
+            print()
+        if len(reports) == 2:
+            before = reports["undefended"].injection_success_rate
+            after = reports["defended"].injection_success_rate
+            print(
+                f"  injection success: {before:.1%} undefended -> {after:.1%} defended"
+            )
+            print(
+                "  Read that beside the refusal rate: a defence that refuses everything"
+            )
+            print("  scores zero injections and is useless.")
+
+    if args.snapshot:
+        from rag_app.before_after import make_snapshot, snapshot_path, write_snapshot
+
+        # Snapshot the config THAT ARM RAN WITH, not always the defended one:
+        # otherwise both sides record identical defence switches and `compare`
+        # reports "no configuration difference" on the A/B's own headline.
+        arm = "defended" if "defended" in reports else args.arm
+        arm_cfg = rt_cfg if arm == "defended" else undefended(rt_cfg)
+        path = snapshot_path(cfg, args.snapshot)
+        write_snapshot(
+            make_snapshot(args.snapshot, arm_cfg, attack_metrics(reports[arm]), cases,
+                          note=args.note or ""),
+            path,
+        )
+        print(f"Snapshot written to {path}", file=sys.stderr)
     return 0
 
 
@@ -728,6 +914,7 @@ _HANDLERS = {
     "agent": cmd_agent,
     "arena": cmd_arena,
     "atasks": cmd_atasks,
+    "redteam": cmd_redteam,
 }
 
 

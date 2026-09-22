@@ -272,3 +272,109 @@ def test_comparison_json_carries_per_arm_totals(tmp_path):
     payload = json.loads(comparison_to_json(report))
     assert payload["totals"]["workflow"]["questions"] == 1
     assert payload["totals"]["workflow"]["correct"] == 1
+
+
+# ---------------------------------------------------------------------------
+# BUG 1 / BUG 2 — a refusal is a decision, not an exhaustion
+# ---------------------------------------------------------------------------
+
+
+def test_a_task_that_blew_its_step_budget_is_not_scored_as_a_correct_refusal():
+    """`_stop()` sets refused=True on every budget trip, so scoring on `refused`
+    alone credited a run that merely ran out of steps. This inflated
+    refusal_accuracy by however many unanswerable tasks were exhausting a budget.
+    """
+    r = report_of([(task(must_contain=[], unanswerable=True),
+                    result(stop="max-steps", refused=True, failed=True))])
+    assert r.refusal_accuracy == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("stop", ["no-evidence", "model-refused"])
+def test_a_refusal_by_decision_still_counts(stop):
+    r = report_of([(task(must_contain=[], unanswerable=True),
+                    result(stop=stop, refused=True))])
+    assert r.refusal_accuracy == pytest.approx(1.0)
+
+
+def test_no_evidence_counts_even_though_it_sets_failed():
+    """It is the BEST kind of refusal — the gate caught an ungrounded answer —
+    so `refused and not failed` would have been the wrong rule."""
+    r = report_of([(task(must_contain=[], unanswerable=True),
+                    result(stop="no-evidence", refused=True, failed=True))])
+    assert r.refusal_accuracy == pytest.approx(1.0)
+
+
+def test_refusal_accuracy_delegates_to_success_so_they_cannot_drift():
+    rows = [(task(must_contain=[], unanswerable=True), result(stop="no-evidence"))]
+    r = report_of(rows)
+    assert r.refusal_accuracy == pytest.approx(1.0)
+    assert r.unanswerable[0].success is True
+
+
+def test_a_correct_refusal_counts_as_budget_adherent():
+    """Requiring `final-answer` made every unanswerable task structurally
+    unreachable, understating budget_adherence by its whole denominator."""
+    r = report_of([(task(must_contain=[], unanswerable=True), result(stop="no-evidence"))])
+    assert r.budget_adherence == pytest.approx(1.0)
+
+
+def test_a_budget_trip_is_never_budget_adherent():
+    r = report_of([(task(), result(stop="max-steps"))])
+    assert r.budget_adherence == pytest.approx(0.0)
+    assert len(r.stopped_on_budget) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cost per task
+# ---------------------------------------------------------------------------
+
+
+def test_percentile_uses_nearest_rank_and_never_interpolates():
+    from rag_app.agent_eval import percentile
+
+    values = [1, 2, 3, 4, 5, 6, 7, 8]
+    assert percentile(values, 99) == 8      # a value that was actually measured
+    assert percentile(values, 50) == 4
+    assert percentile([], 99) == 0.0
+    assert percentile([5], 99) == 5
+
+
+def test_p99_below_a_hundred_samples_is_the_maximum_and_the_report_says_so():
+    from rag_app.agent_eval import percentile_is_max
+
+    assert percentile_is_max(8, 99) is True
+    assert percentile_is_max(99, 99) is True
+    assert percentile_is_max(1000, 99) is False
+
+    out = report_of([(task(), result())] * 8).describe()
+    assert "IS the maximum" in out
+    assert "nearest rank, no" in out
+
+
+def test_cost_is_reported_over_every_task_including_refusals():
+    rows = [
+        (task(), result(tools=("a", "b", "c"))),
+        (task(must_contain=[], unanswerable=True), result(stop="no-evidence")),
+    ]
+    stats = report_of(rows).cost_stats
+    assert stats["steps"].n == 2            # the refusal is counted, not skipped
+    assert stats["llm calls"].p99 >= stats["llm calls"].mean
+
+
+def test_cost_never_claims_a_dollar_figure():
+    out = report_of([(task(), result())]).describe()
+    assert "COST PER TASK" in out
+    assert "a price table this project does not carry" in out
+    assert "$" not in out
+
+
+def test_the_arena_does_not_credit_the_agent_for_running_out_of_steps():
+    """BUG 1's second site: compare.py graded an unanswerable question on
+    `refused` alone, and every budget trip sets it."""
+    from rag_app.compare import _grade
+
+    unanswerable = GoldQuestion(question="the weather?", unanswerable=True)
+    assert _grade(unanswerable, "I don't know", True, "no-evidence") is True
+    assert _grade(unanswerable, "I don't know", True, "max-steps") is False
+    # the workflow arm passes no stop_reason and is unaffected
+    assert _grade(unanswerable, "I don't know", True) is True
