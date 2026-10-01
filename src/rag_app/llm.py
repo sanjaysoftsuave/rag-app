@@ -29,7 +29,7 @@ key check. Two consequences, both load-bearing:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from rag_app.config import AppConfig, LlmConfig
@@ -72,14 +72,26 @@ def chat_messages(
     *,
     client: Any | None = None,
     temperature: float | None = None,
+    usage: "Usage | None" = None,
 ) -> str:
-    """One completion from a full message list. Returns stripped text."""
+    """One completion from a full message list. Returns stripped text.
+
+    `usage`, when given, is handed the REAL response's token counts — free,
+    off the API's own reply, no tokenizer dependency. Every existing caller
+    passes nothing and is unaffected; see the module's usage-tracking section.
+    """
     client = build_client(cfg, llm, client)
     response = client.chat.completions.create(
         model=llm.model,
         messages=messages,
         temperature=llm.temperature if temperature is None else temperature,
     )
+    if usage is not None and getattr(response, "usage", None) is not None:
+        usage.add(
+            llm.model,
+            response.usage.prompt_tokens or 0,
+            response.usage.completion_tokens or 0,
+        )
     return (response.choices[0].message.content or "").strip()
 
 
@@ -91,6 +103,7 @@ def chat_once(
     *,
     client: Any | None = None,
     temperature: float | None = None,
+    usage: "Usage | None" = None,
 ) -> str:
     """The common case: one system message, one user message."""
     return chat_messages(
@@ -99,6 +112,7 @@ def chat_once(
         cfg,
         client=client,
         temperature=temperature,
+        usage=usage,
     )
 
 
@@ -228,6 +242,87 @@ class CallEstimate:
                 f"~{self.on_judge_model} on {self.judge_model}"
             )
         return line
+
+
+# ---------------------------------------------------------------------------
+# Week 10: real tokens, declared cost
+# ---------------------------------------------------------------------------
+#
+# CLAUDE.md previously stated no dollar figure would ever be computed here,
+# because the only way to get one was a tokenizer this project does not carry
+# plus an invented price table — "a fabricated one would be worse than none".
+# This reverses that, on different grounds: `response.usage` is a REAL count
+# off the API's own reply, not an estimate, so pairing it with a price table
+# that is DECLARED (dated, in config.yaml, editable) is a computation, not a
+# fabrication. The table drifts; `cost_usd` says so is still owed to the
+# reader, which is why a model missing from it prices as None, never 0 — see
+# `price_usage`.
+
+
+@dataclass
+class Usage:
+    """Accumulates REAL token counts across one or more chat_messages() calls.
+
+    Keyed by model because a team-shaped run could in principle mix models
+    (this week's team does not — same model everywhere, by design — but the
+    accounting is correct regardless, and `price_usage` can then refuse to
+    price a run honestly rather than silently pricing only part of it)."""
+
+    by_model: dict[str, tuple[int, int]] = field(default_factory=dict)
+    calls: int = 0
+
+    def add(self, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+        p, c = self.by_model.get(model, (0, 0))
+        self.by_model[model] = (p + prompt_tokens, c + completion_tokens)
+        self.calls += 1
+
+    @property
+    def prompt_tokens(self) -> int:
+        return sum(p for p, _ in self.by_model.values())
+
+    @property
+    def completion_tokens(self) -> int:
+        return sum(c for _, c in self.by_model.values())
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+def price_usage(usage: Usage, prices: dict[str, tuple[float, float]]) -> float | None:
+    """Dollars for everything `usage` recorded, or None.
+
+    None the instant any model actually used is missing from `prices` —
+    pricing only the models that happen to be listed would silently under-
+    report a run that touched an unpriced one, which is a worse lie than
+    saying nothing.
+    """
+    total = 0.0
+    for model, (prompt, completion) in usage.by_model.items():
+        price = prices.get(model)
+        if price is None:
+            return None
+        prompt_price, completion_price = price
+        total += prompt / 1_000_000 * prompt_price + completion / 1_000_000 * completion_price
+    return total
+
+
+def usage_summary(usage: "Usage | None", cfg: AppConfig) -> dict[str, Any] | None:
+    """`result.meta["usage"]`'s shape, in one place so agent.py and team.py
+    compute it identically.
+
+    None when no meter was supplied at all, or it recorded nothing — this is
+    "not measured", distinct from a summary reporting zero tokens, which
+    would claim a call was measured and cost nothing.
+    """
+    if usage is None or usage.calls == 0:
+        return None
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "cost_usd": price_usage(usage, cfg.evaluation.token_prices),
+    }
 
 
 def estimate_calls(

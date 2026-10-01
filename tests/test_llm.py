@@ -27,8 +27,9 @@ from rag_app.llm import (
 class FakeClient:
     """Duck-types `client.chat.completions.create`, recording what it was sent."""
 
-    def __init__(self, reply="ok"):
+    def __init__(self, reply="ok", usage=None):
         self.reply = reply
+        self.usage = usage  # Week 10: an object with .prompt_tokens/.completion_tokens, or None
         self.seen = {}
         outer = self
 
@@ -44,6 +45,7 @@ class FakeClient:
 
                 class _Resp:
                     choices = [_Choice()]
+                    usage = outer.usage
 
                 return _Resp()
 
@@ -51,6 +53,12 @@ class FakeClient:
             completions = _Completions()
 
         self.chat = _Chat()
+
+
+class _FakeUsage:
+    def __init__(self, prompt_tokens, completion_tokens):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +222,85 @@ def test_the_estimate_names_both_models_so_the_expensive_half_is_visible():
     out = est.describe()
     assert "cheap/model" in out and "expensive/model" in out
     assert "~10 LLM calls" in out
+
+
+# ---------------------------------------------------------------------------
+# Week 10: real tokens, declared cost
+# ---------------------------------------------------------------------------
+
+
+def test_usage_accumulates_across_models_separately():
+    from rag_app.llm import Usage
+
+    u = Usage()
+    u.add("model-a", 100, 10)
+    u.add("model-a", 50, 5)
+    u.add("model-b", 1, 1)
+    assert u.by_model == {"model-a": (150, 15), "model-b": (1, 1)}
+    assert u.prompt_tokens == 151
+    assert u.completion_tokens == 16
+    assert u.total_tokens == 167
+    assert u.calls == 3
+
+
+def test_price_usage_is_none_when_any_model_used_is_unlisted():
+    from rag_app.llm import Usage, price_usage
+
+    u = Usage()
+    u.add("priced/model", 1_000_000, 1_000_000)
+    assert price_usage(u, {"priced/model": (1.0, 2.0)}) == pytest.approx(3.0)
+    u.add("unpriced/model", 1, 1)
+    assert price_usage(u, {"priced/model": (1.0, 2.0)}) is None
+
+
+def test_usage_summary_is_none_without_a_meter_or_with_an_empty_one(tmp_path):
+    from rag_app.llm import Usage, usage_summary
+
+    cfg = make_config(tmp_path)
+    assert usage_summary(None, cfg) is None
+    assert usage_summary(Usage(), cfg) is None
+
+
+def test_usage_summary_reports_tokens_and_cost(tmp_path):
+    from rag_app.config import EvaluationConfig
+    from rag_app.llm import Usage, usage_summary
+
+    cfg = make_config(tmp_path, evaluation=EvaluationConfig(token_prices={"x": (1.0, 2.0)}))
+    u = Usage()
+    u.add("x", 1_000_000, 500_000)
+    summary = usage_summary(u, cfg)
+    assert summary == {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 500_000,
+        "total_tokens": 1_500_000,
+        "cost_usd": pytest.approx(2.0),
+    }
+
+
+def test_chat_messages_records_real_usage_when_a_meter_is_given(tmp_path):
+    from rag_app.llm import Usage
+
+    cfg = make_config(tmp_path)
+    fake = FakeClient("ok", usage=_FakeUsage(prompt_tokens=42, completion_tokens=7))
+    u = Usage()
+    chat_messages([{"role": "user", "content": "hi"}], cfg.llm, cfg, client=fake, usage=u)
+    assert u.by_model == {cfg.llm.model: (42, 7)}
+
+
+def test_chat_messages_with_no_meter_never_touches_usage(tmp_path):
+    """The overwhelming majority of callers pass nothing; must stay a no-op."""
+    cfg = make_config(tmp_path)
+    fake = FakeClient("ok", usage=_FakeUsage(prompt_tokens=42, completion_tokens=7))
+    out = chat_messages([{"role": "user", "content": "hi"}], cfg.llm, cfg, client=fake)
+    assert out == "ok"
+
+
+def test_a_client_with_no_usage_attribute_degrades_silently(tmp_path):
+    """Some fakes (and some providers) never set .usage; must not raise."""
+    from rag_app.llm import Usage
+
+    cfg = make_config(tmp_path)
+    fake = FakeClient("ok")  # usage=None
+    u = Usage()
+    chat_messages([{"role": "user", "content": "hi"}], cfg.llm, cfg, client=fake, usage=u)
+    assert u.calls == 0

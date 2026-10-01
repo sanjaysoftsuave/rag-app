@@ -210,7 +210,16 @@ def compare_arms(
     clock=None,
     generated: bool = False,
 ) -> ComparisonReport:
-    """Run the same questions through `ask()` and through `run_agent()`."""
+    """Run the same questions through `ask()` and through `run_agent()`.
+
+    `generate_fn`/`llm_fn` follow ONE contract, deliberately the opposite of
+    `ask()`'s own "`None` means use the real default": here `None` means
+    "nothing was given, fall back to a safe DRY stand-in" — a caller of
+    `compare_arms` who passes nothing must never accidentally make a real,
+    billed call. To actually run for real, pass the REAL callable explicitly
+    (`generate.generate_answer`, `agent._call` or a `Usage`-aware wrapper
+    around it) — `cmd_arena` does exactly this when `--generate` is set.
+    """
     from rag_app.agent import run_agent
     from rag_app.pipeline import ask
 
@@ -241,12 +250,16 @@ def compare_arms(
                 )
             )
 
-        for arm in [a for a in arms if a in ("agent", "langgraph")]:
+        for arm in [a for a in arms if a in ("agent", "langgraph", "team")]:
             runner = run_agent
             if arm == "langgraph":
                 from rag_app.agent_langgraph import run_agent_langgraph
 
                 runner = run_agent_langgraph
+            elif arm == "team":
+                from rag_app.team import run_team
+
+                runner = run_team
             counter = _Counter(
                 llm_fn or (lambda m, c: f"Thought: dry\nAction: final_answer\nAction Input: {DRY_ANSWER}")
             )

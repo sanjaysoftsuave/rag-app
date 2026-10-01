@@ -20,7 +20,8 @@ from conftest import (
     scripted_llm,
 )
 
-from rag_app.agent import SYSTEM, AgentResult, Budget, build_prompt, finalize, run_agent
+from rag_app.agent import SYSTEM, AgentResult, Budget, _account, build_prompt, finalize, run_agent
+from rag_app.llm import Usage
 from rag_app.chunking import Chunk
 from rag_app.generate import CITATION_RULES, DONT_KNOW
 from rag_app.store import ScoredChunk
@@ -427,3 +428,61 @@ def test_a_refusal_is_a_decision_and_a_budget_trip_is_an_exhaustion():
     for reason in ("max-steps", "wall-clock", "unparseable", "repeated-action",
                    "max-tool-calls", "token-budget", "max-llm-calls", "llm-error"):
         assert reason in BUDGET_STOPS
+
+
+# ---------------------------------------------------------------------------
+# Week 10: usage accounting goes through the same chokepoint as everything else
+# ---------------------------------------------------------------------------
+
+
+def test_account_records_usage_when_both_usage_and_cfg_are_given(tmp_path):
+    cfg = make_config(tmp_path)
+    budget = Budget(cfg, clock=lambda: 0.0)
+    u = Usage()
+    u.add(cfg.llm.model, 10, 5)
+    result = _account(AgentResult(question="q"), budget, [], [], usage=u, cfg=cfg)
+    assert result.meta["usage"]["total_tokens"] == 15
+
+
+def test_account_is_a_noop_on_usage_without_cfg(tmp_path):
+    """cfg is what carries the price table; without it there is nothing to
+    compute, so _account must not guess."""
+    cfg = make_config(tmp_path)
+    budget = Budget(cfg, clock=lambda: 0.0)
+    u = Usage()
+    u.add(cfg.llm.model, 10, 5)
+    result = _account(AgentResult(question="q"), budget, [], [], usage=u)
+    assert "usage" not in result.meta
+
+
+def test_an_injected_llm_fn_bypasses_metering_structurally(tmp_path):
+    """Documented, not a bug: a custom llm_fn has no usage parameter to
+    report through, same as clock only governing the internal Budget."""
+    cfg = make_config(tmp_path)
+    llm = scripted_llm(turn("final_answer", "x"))
+    tools = static_tool()
+    result = run_agent("q?", cfg, tools=tools, llm_fn=llm, usage=Usage())
+    assert "usage" not in result.meta
+
+
+def test_usage_is_recorded_through_account_on_a_final_answer_and_a_budget_stop(tmp_path):
+    """A usage-aware llm_fn (standing in for the real default caller) proves
+    run_agent threads usage/cfg into _account on BOTH kinds of exit — the
+    exact distinction Week 8's BUG-3 fix exists to get right for every other
+    cost field."""
+    from rag_app.config import AgentConfig
+
+    cfg = make_config(tmp_path, agent=AgentConfig(max_steps=2))
+    tools = static_tool()
+
+    def metered(meter):
+        def llm_fn(messages, c):
+            meter.add(c.llm.model, 100, 10)
+            return turn("search_documents", "q")  # never finalizes -> max-steps
+
+        return llm_fn
+
+    u = Usage()
+    result = run_agent("q?", cfg, tools=tools, llm_fn=metered(u), usage=u)
+    assert result.stop_reason == "max-steps"
+    assert result.meta["usage"]["total_tokens"] == 220  # 2 steps x 110 tokens

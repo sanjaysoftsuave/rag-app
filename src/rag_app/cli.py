@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("question")
     p.add_argument("--preset", default=None)
     p.add_argument(
-        "--impl", default=None, choices=["plain", "langgraph"],
+        "--impl", default=None, choices=["plain", "langgraph", "team"],
         help="Which loop implementation to run (default from config)",
     )
     p.add_argument("--max-steps", type=int, default=None)
@@ -189,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gold", default=None)
     p.add_argument(
         "--arms", default="workflow,agent",
-        help="Comma-separated: workflow, agent, langgraph",
+        help="Comma-separated: workflow, agent, langgraph, team",
     )
     p.add_argument(
         "--generate", action="store_true",
@@ -200,7 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("atasks", help="Trajectory-level agent evaluation")
     p.add_argument("--preset", default=None)
     p.add_argument("--tasks", default=None, help="Task YAML (default data/agent_tasks.yaml)")
-    p.add_argument("--impl", default=None, choices=["plain", "langgraph"])
+    p.add_argument("--impl", default=None, choices=["plain", "langgraph", "team"])
     p.add_argument("--generate", action="store_true", help="Actually call the LLM")
     p.add_argument("--json", action="store_true", help="Machine-readable summary")
     p.add_argument(
@@ -433,7 +433,27 @@ def cmd_compare(args: argparse.Namespace) -> int:
         return 1
 
     result = compare(before, after)
-    print(comparison_to_json(result) if args.json else result.describe())
+    if args.json:
+        print(comparison_to_json(result))
+        return 0
+
+    print(result.describe())
+    # An extra, honest verdict paragraph specifically for an agent-vs-agent
+    # race (Week 10's `atasks --impl plain` vs `--impl team`, or any other
+    # implementation pair): both snapshots must name which implementation ran
+    # and both must carry task_success, or this says nothing rather than
+    # guessing. Same signal before_after.py itself uses elsewhere: only print
+    # a verdict when there is something to read it from.
+    before_impl = before.settings.get("agent_implementation")
+    after_impl = after.settings.get("agent_implementation")
+    if (
+        before_impl and after_impl
+        and "task_success" in before.metrics and "task_success" in after.metrics
+    ):
+        from rag_app.agent_eval import implementation_verdict
+
+        print(f"\n{before_impl} -> {after_impl}")
+        print(implementation_verdict(before.metrics, after.metrics))
     return 0
 
 
@@ -544,6 +564,10 @@ def _resolve_runner(impl: str):
         from rag_app.agent_langgraph import run_agent_langgraph
 
         return run_agent_langgraph
+    if impl == "team":
+        from rag_app.team import run_team
+
+        return run_team
     from rag_app.agent import run_agent
 
     return run_agent
@@ -653,6 +677,42 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cfg_for_impl(cfg, impl: str | None):
+    """The config to SNAPSHOT, reflecting which --impl actually ran.
+
+    `load_config()`'s own `cfg.agent.implementation` is whatever config.yaml
+    says, not what `--impl` overrode for this run — without this,
+    `atasks --impl team --snapshot team-v1` would still record
+    agent_implementation unchanged, and `compare` would falsely report "no
+    configuration difference" on the race's own headline. Same bug class
+    `redteam`'s snapshotting already guards against for its defended/
+    undefended arms.
+    """
+    if not impl:
+        return cfg
+    from dataclasses import replace
+
+    return replace(cfg, agent=replace(cfg.agent, implementation=impl))
+
+
+def _arena_callables(generate: bool):
+    """Which generate_fn/llm_fn `compare_arms` should use.
+
+    Separated into its own function so the CHOICE is unit-testable without a
+    real client or network. `compare_arms`' own convention is the OPPOSITE of
+    `ask()`'s: `None` there means "fall back to a safe dry stand-in", so
+    running for real means passing the REAL callable explicitly — this is
+    exactly the line that used to pass `None` when `generate` was True,
+    silently dry-running both arms of `arena --generate`.
+    """
+    from rag_app.agent import _call as agent_call
+    from rag_app.generate import generate_answer
+
+    if generate:
+        return generate_answer, agent_call
+    return (lambda q, c, k: "(dry run)"), (lambda m, c: DRY_AGENT_TURN)
+
+
 def cmd_arena(args: argparse.Namespace) -> int:
     from rag_app.compare import compare_arms, comparison_to_json
 
@@ -675,13 +735,12 @@ def cmd_arena(args: argparse.Namespace) -> int:
             f"{len(gold) * cfg.agent.max_steps} agent calls. Pass --generate.",
             file=sys.stderr,
         )
+    generate_fn, llm_fn = _arena_callables(args.generate)
     try:
         report = compare_arms(
             gold, cfg, arms=arms, preset=args.preset, store=store,
             embedder=embedder, reranker=reranker, tools=tools,
-            generate_fn=None if args.generate else (lambda q, c, k: "(dry run)"),
-            llm_fn=None if args.generate else (lambda m, c: DRY_AGENT_TURN),
-            generated=args.generate,
+            generate_fn=generate_fn, llm_fn=llm_fn, generated=args.generate,
         )
     finally:
         store.close()
@@ -724,12 +783,16 @@ def cmd_atasks(args: argparse.Namespace) -> int:
             f"run costs up to {len(tasks) * cfg.agent.max_steps} calls. Pass --generate.",
             file=sys.stderr,
         )
+    from rag_app.llm import Usage
+
+    usage = Usage() if args.generate else None
     try:
         report = evaluate_agent(
             tasks, cfg, tools=tools,
             llm_fn=None if args.generate else (lambda m, c: "(dry run)"),
             runner=_resolve_runner(args.impl or cfg.agent.implementation),
             generated=args.generate,
+            usage=usage,
         )
     finally:
         store.close()
@@ -740,11 +803,12 @@ def cmd_atasks(args: argparse.Namespace) -> int:
         # the snapshot write must not happen inside the finally.
         from rag_app.before_after import make_snapshot, snapshot_path, write_snapshot
 
+        cfg_for_snapshot = _cfg_for_impl(cfg, args.impl)
         path = snapshot_path(cfg, args.snapshot)
         write_snapshot(
             make_snapshot(
-                args.snapshot, cfg, agent_metrics(report), agent_gold_view(tasks),
-                note=args.note or "",
+                args.snapshot, cfg_for_snapshot, agent_metrics(report),
+                agent_gold_view(tasks), note=args.note or "",
             ),
             path,
         )

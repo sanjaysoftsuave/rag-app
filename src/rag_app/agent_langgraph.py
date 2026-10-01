@@ -53,7 +53,6 @@ from rag_app.agent import (
     Step,
     build_prompt,
     finalize,
-    _call,
     _evidence_from,
     _stop,
 )
@@ -106,12 +105,13 @@ def available() -> bool:
     return find_spec("langgraph") is not None
 
 
-def build_graph(cfg: AppConfig, tools: ToolRegistry, *, llm_fn=None, clock=None):
+def build_graph(cfg: AppConfig, tools: ToolRegistry, *, llm_fn=None, clock=None, usage=None):
     """A two-node StateGraph: think -> act -> think, with budgets in the router."""
     _require()
     from langgraph.graph import END, StateGraph
+    from rag_app.llm import chat_messages
 
-    caller = llm_fn or _call
+    caller = llm_fn or (lambda messages, c: chat_messages(messages, c.llm, c, usage=usage))
     budget = Budget(cfg, clock=clock)
 
     def think(state: AgentState) -> AgentState:
@@ -260,6 +260,7 @@ def run_agent_langgraph(
     memory=None,
     clock=None,
     max_steps: int | None = None,
+    usage=None,
 ) -> AgentResult:
     """Same signature and same AgentResult as `agent.run_agent`."""
     if max_steps is not None:
@@ -268,7 +269,7 @@ def run_agent_langgraph(
         cfg = replace(cfg, agent=replace(cfg.agent, max_steps=max_steps))
 
     _require()
-    graph, budget = build_graph(cfg, tools, llm_fn=llm_fn, clock=clock)
+    graph, budget = build_graph(cfg, tools, llm_fn=llm_fn, clock=clock, usage=usage)
     state: dict[str, Any] = {
         "question": question, "steps": [], "evidence": [],
         "stop_reason": "", "text": "", "llm_calls": 0, "tool_calls": 0,
@@ -285,6 +286,11 @@ def run_agent_langgraph(
     result.used_llm = result.llm_calls > 0
     result.elapsed_s = budget.elapsed
     result.meta["implementation"] = "langgraph"
+    from rag_app.llm import usage_summary
+
+    summary = usage_summary(usage, cfg)
+    if summary is not None:
+        result.meta["usage"] = summary
 
     if final.get("stop_reason"):
         return _stop(result, final["stop_reason"], final.get("stop_detail", ""))

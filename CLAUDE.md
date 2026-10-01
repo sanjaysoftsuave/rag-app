@@ -23,7 +23,7 @@ How the venv got fixed, in case it recurs: `pyvenv.cfg` pointed at a `home =` in
 ## Commands
 
 ```bash
-python -m pytest -q                    # 687 passed, 1 skipped, ~7s — real embedded Qdrant per test
+python -m pytest -q                    # 725 passed, 1 skipped, ~10s — real embedded Qdrant per test
 python -m pytest tests/test_grounding.py -q            # the four grounding guarantees
 python -m pytest tests/test_pdfs.py tests/test_explain.py -q   # PDF loading + UI introspection
 
@@ -37,9 +37,9 @@ python -m rag_app debug [--generate] [--show-pass]     # retrieval vs generation
 python -m rag_app codes [--init] [--json]              # rank your open-coding categories
 python -m rag_app judge [--init] [--json]              # judge vs your labels: agreement + kappa
 python -m rag_app compare BEFORE AFTER [--json]        # diff two eval snapshots
-python -m rag_app agent "..." [--impl plain|langgraph] [--max-steps N] [--memory]
-python -m rag_app arena [--arms workflow,agent] [--generate]   # workflow vs agent
-python -m rag_app atasks [--tasks PATH] [--generate] [--snapshot L] [--note T]
+python -m rag_app agent "..." [--impl plain|langgraph|team] [--max-steps N] [--memory]
+python -m rag_app arena [--arms workflow,agent,team] [--generate]   # workflow vs agent vs team
+python -m rag_app atasks [--tasks PATH] [--impl plain|langgraph|team] [--generate] [--snapshot L] [--note T]
 python -m rag_app redteam --build-index                # build the SEPARATE attack index
 python -m rag_app redteam [--arm defended|undefended|both] [--generate]
 python -m rag_app mcp-serve [--transport stdio|http] [--port N]   # this app's own MCP server
@@ -596,6 +596,124 @@ is for a server you already trust the network path to, not a public
 endpoint. No multi-agent/A2A: the module title mentions it, but the graded
 task and the Friday mentor check are entirely MCP.
 
+### Multi-agent: a manager plus two specialists, raced honestly against the solo agent
+
+Week 9 deferred A2A to "the module title mentions it, but the graded task is
+entirely MCP." Week 10 is that deferred thread: build a small team, race it
+against the Week 7 ReAct agent on the SAME test set
+(`data/agent_tasks.yaml`), and report quality, speed, tokens and cost with an
+honest verdict — including the syllabus's own expected finding, that the
+single agent often wins.
+
+**The written-down prediction, before measuring** (same discipline
+`compare.py` already uses): on this corpus — one PDF, mostly single-hop
+questions — the team should LOSE on cost and tokens, because the manager's
+synthesis step re-sends both specialists' full reports, which is pure
+overhead when nothing needed to be split. It should only plausibly win where
+a question has two independently-checkable parts.
+
+**A specialist is `agent.run_agent`, not a second ReAct loop.**
+[team.py](src/rag_app/team.py) narrows one by TOOL VISIBILITY
+(`ToolRegistry.restrict`, Week 8's own enforcement seam, reused rather than
+rebuilt) and frames it by appending the manager's focus instruction to the
+question text — `agent.build_prompt` and `agent.SYSTEM` are reused completely
+unmodified. Specialist A (search) gets `search_documents` + `keyword_search`;
+specialist B (verify) gets `list_sources` + `read_source`. The manager makes
+exactly two calls of its own: one to plan a focused instruction per
+specialist (parsed with the existing `llm.extract_json`, degrading to the raw
+question for both specialists on a malformed reply rather than crashing), and
+one to synthesize a final answer from both reports. `SYNTHESIS_SYSTEM`
+imports `generate.CITATION_RULES`/`generate.DATA_BOUNDARY` **verbatim**,
+exactly as `agent.SYSTEM` does — two independently-worded citation contracts
+is how the `[CS-1001]` failure happened the first time.
+
+**The manager's synthesis answer is gated by `agent.finalize` — the SAME
+function the solo agent uses** — over the union of both specialists'
+evidence (deduped by chunk id), with both specialists' `forged_labels`
+merged into `meta["defences"]` first. No-evidence gate, forged-citation gate,
+refusal stripping, hallucinated-citation checking: all reused, none
+reimplemented. `run_team` returns a plain `AgentResult`, the same dataclass
+`run_agent`/`run_agent_langgraph` return, so it is a drop-in `runner=` for
+`agent_eval.evaluate_agent` and `compare.compare_arms` — no new comparison
+machinery anywhere, and `--impl team` is a third option next to `plain`/
+`langgraph` everywhere `--impl` already existed (`agent`, `atasks`,
+`arena --arms`).
+
+**Real tokens, declared cost — a reversal of this file's own prior stance,
+stated rather than silent.** This file used to say a dollar figure would
+never be computed because it would need "a tokenizer this project does not
+carry... a fabricated one would be worse than none." Week 10 computes one
+anyway, on different grounds: `response.usage` is a REAL count off the API's
+own reply (`llm.Usage`, threaded through `chat_messages` as an optional
+`usage=` kwarg — every existing caller passes nothing and is unaffected), not
+an estimate, so pairing it with a DECLARED price table
+(`evaluation.token_prices` in `config.yaml`, dated, editable) is a
+computation, not the fabrication the old rule ruled out. A model missing from
+the table prices as `None`, never `0` — `llm.price_usage` refuses to price a
+run the instant any model it touched is unlisted, and
+`AgentEvalReport.unpriced_tasks` makes that visible in `atasks`'s own output
+rather than letting an unpriced run look like a free one. The same `Usage`
+meter accumulates across `agent.run_agent`, `agent_langgraph.run_agent_langgraph`
+and `team.run_team` alike (one pricing function, `llm.usage_summary`, called
+from each), so the "tokens" and "cost usd" rows in `atasks`'s COST PER TASK
+table are directly comparable across every implementation.
+
+**`agent_eval.cost_stats` needed no new code to pick up the new dims** —
+`agent_metrics`'s existing `mean_<dim>`/`p99_<dim>` auto-derivation already
+covers whatever `cost_stats` returns; "tokens" and "cost usd" just needed to
+be added to that one dict. `before_after.HIGHER_IS_BETTER` gets the four new
+keys, `False` (lower is better, read beside `task_success` — same caveat as
+every other cost dim). `cmd_compare` prints one extra honest verdict
+paragraph (`agent_eval.implementation_verdict`) whenever both snapshots name
+an `agent_implementation` and carry `task_success` — judged against the SAME
+one-task noise floor `before_after.Comparison.one_question_worth` already
+uses, so quality beyond noise wins regardless of cost, and a wash defers to
+whichever arm is cheaper.
+
+**Two real bugs, found while building this and fixed as prerequisites, not
+shipped quietly:**
+
+1. **`arena --generate` had never actually called a real LLM.**
+   `compare_arms`'s own convention is `None` → "fall back to a safe dry
+   stand-in" (the opposite of `ask()`'s "`None` → use the real default"), and
+   `cmd_arena` passed `None` for BOTH arms precisely when `--generate` was
+   set, trusting the wrong convention. `compare.py` has decent test coverage
+   of `compare_arms` itself (in `test_agent_eval.py`), which is exactly why
+   this was invisible: every existing test passes an explicit real-shaped
+   function and never exercises what `cmd_arena` actually sends. Fixed by
+   extracting `cli._arena_callables(generate: bool)` — a small, directly
+   testable function that returns `(generate_answer, agent._call)` when
+   `generate` is True and the dry stand-ins otherwise — with a test pinning
+   the exact regression.
+2. **`atasks --snapshot` never recorded which `--impl` ran.** It snapshotted
+   `load_config()`'s own `cfg`, not one reflecting `args.impl`, so comparing
+   a `plain` snapshot against a `team` one would have falsely reported "no
+   configuration difference" on the race's own headline — the same bug class
+   already fixed for `redteam`'s defended/undefended arms, apparently never
+   applied here. Fixed with `cli._cfg_for_impl(cfg, impl)`, same small-
+   testable-function treatment.
+
+```bash
+python -m rag_app atasks --impl plain --generate --snapshot single-v1 --note "single ReAct agent"
+python -m rag_app atasks --impl team  --generate --snapshot team-v1   --note "manager + 2 specialists"
+python -m rag_app compare single-v1 team-v1
+```
+
+**What is deliberately not built, and why.** Both specialists run
+SEQUENTIALLY, sharing one `clock` — a `scripted_llm` reply list has no
+well-defined order across two threads, and this suite's determinism is worth
+more than a speed number this week does not need to win on. This makes the
+team's own latency a WORST case: the syllabus's "when does multi-agent help"
+answer is partly "when sub-tasks are independent and can run in parallel",
+which this implementation does not exploit — a parallel version would close
+some of the latency gap, though not the cost/token gap, which is structural
+to the re-send pattern regardless of parallelism. Manager and both
+specialists all call `cfg.llm` — the same model everywhere, deliberately, so
+"team structure vs. single agent" stays one experimental variable rather than
+two. No team-level hard budget beyond each specialist's own
+`cfg.agent.team.specialist_max_steps`/`specialist_max_tool_calls` — the race
+measures total cost this week; it does not cap it further.
+
 ### MMR, query rewriting and HyDE are built and OFF by default
 
 Three optional stages, each a real change to what the model reads:
@@ -646,7 +764,7 @@ Swapping the model is a `config.yaml` edit plus a re-ingest. `StoreMeta.assert_c
 
 ### The test suite pays a real, measured cost for testing the real backend
 
-Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **687 passed, 1 skipped in ~7s** (measured, Python 3.14.7, with all three
+Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **725 passed, 1 skipped in ~10s** (measured, Python 3.14.7, with all three
 optional extras installed — `agents`, `mem0`, `mcp`; the skip is the without-langgraph branch, inverted for a test that only makes sense when the extra IS present).
 
 Still fully offline (no network, no model download) and fast enough to run on every change, just no longer near-instant. If a test needs to reopen a store it just built (proving a fix like the one above), it must explicitly `.close()` the first handle first — embedded mode holds a real file lock.

@@ -227,6 +227,11 @@ def test_wrong_answer_right_path_has_no_direction_and_therefore_no_verdict():
     assert next(r for r in c.rows if r.name == "wrong_answer_right_path").verdict == ""
 
 
+def test_token_and_cost_metrics_read_lower_as_better():
+    for key in ("mean_tokens", "p99_tokens", "mean_cost_usd", "p99_cost_usd"):
+        assert HIGHER_IS_BETTER[key] is False
+
+
 def test_a_run_note_records_a_code_change_settings_cannot_see(tmp_path):
     """settings_of records CONFIGURATION; most real interventions are code."""
     cfg = make_config(tmp_path)

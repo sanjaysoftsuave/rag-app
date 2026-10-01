@@ -83,6 +83,12 @@ HIGHER_IS_BETTER: dict[str, bool] = {
     "p99_tool_calls": False,
     "mean_prompt_chars": False,
     "p99_prompt_chars": False,
+    # Week 10: real tokens, declared cost. Same "read beside task_success"
+    # caveat as every other cost dim above.
+    "mean_tokens": False,
+    "p99_tokens": False,
+    "mean_cost_usd": False,
+    "p99_cost_usd": False,
     # ---- injection / defence metrics --------------------------------------
     "injection_success_rate": False,
     "forged_citation_rate": False,

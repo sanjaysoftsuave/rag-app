@@ -99,9 +99,9 @@ genuinely easier without a browser:
 | `codes [--init]` | Rank your open-coding categories by frequency × severity. |
 | `judge [--init]` | Measure the LLM judge against your own labels (agreement + kappa). |
 | `compare BEFORE AFTER` | Diff two eval snapshots: what changed, and what it bought. |
-| `agent "..." [--impl plain\|langgraph] [--memory]` | Answer one question with the ReAct loop, printing every step. |
-| `arena [--arms ...] [--generate]` | The same questions through `ask()` and through the agent. |
-| `atasks [--generate] [--snapshot L] [--note T]` | Trajectory-level agent evaluation. |
+| `agent "..." [--impl plain\|langgraph\|team] [--memory]` | Answer one question with the ReAct loop, the LangGraph arm, or the manager+2-specialist team. |
+| `arena [--arms ...] [--generate]` | The same questions through `ask()`, the agent, and/or the team. |
+| `atasks [--impl plain\|langgraph\|team] [--generate] [--snapshot L] [--note T]` | Trajectory-level agent evaluation, any implementation. |
 | `redteam --build-index` | Build the attack index. Never touches `data/tickets`. |
 | `redteam [--arm defended\|undefended\|both]` | Run the injection suite and diff the arms. |
 | `mcp-serve [--transport stdio\|http] [--port N]` | Run this app's own MCP server (`search_documents`). |
@@ -526,10 +526,63 @@ reaches the path that answers a question, and both modules stay importable —
 so the CLI can offer `--mcp-stdio` and reject it politely — on a machine
 where `pip install -e ".[mcp]"` was never run.
 
+## 17. Multi-agent: a manager plus two specialists, raced honestly
+
+A team is NOT a second agent implementation. A specialist is
+[agent.run_agent](src/rag_app/agent.py), narrowed by TOOL VISIBILITY
+([tools.ToolRegistry.restrict](src/rag_app/tools.py), reused from Week 8) and
+framed by appending the manager's focus instruction to the question text —
+the same prompt, the same loop, a smaller toolset. The manager makes exactly
+two calls of its own: one to plan a focused instruction per specialist, one
+to synthesize a final answer from both reports — gated by **the same
+`agent.finalize`** the solo agent uses, over the union of both specialists'
+evidence. No second grounding implementation anywhere.
+
+The written-down prediction, before measuring: on this corpus (one PDF,
+mostly single-hop questions) the team should **lose on cost and tokens** — the
+manager's synthesis step re-sends both specialists' full reports, which is
+pure overhead when nothing needed to be split — confirming the syllabus's own
+point that a single agent often wins.
+
+**Tokens are real, and cost is a declared computation, not a guess.** Earlier
+weeks' stance was that a dollar figure would need a tokenizer this project
+does not carry. Week 10 reverses that on different grounds: `response.usage`
+is a REAL count off the API's own reply, and pairing it with a dated, editable
+price table (`evaluation.token_prices` in `config.yaml`) is a computation. A
+model missing from the table prices as unknown, never `$0`.
+
+```bash
+python -m rag_app atasks --impl plain --generate --snapshot single-v1
+python -m rag_app atasks --impl team  --generate --snapshot team-v1
+python -m rag_app compare single-v1 team-v1
+```
+
+`compare` prints the usual before/after table — quality (`task_success`),
+speed (`mean_wall_clock_s`), tokens (`mean_tokens`), cost (`mean_cost_usd`) —
+plus one extra honest verdict paragraph naming which arm the numbers support
+keeping, judged against the same one-task noise floor every other comparison
+in this repo already uses.
+
+Both specialists run sequentially, sharing one clock, on purpose: a
+`scripted_llm` reply list has no well-defined order across two threads, and
+this repo's test determinism is worth more than a speed number this week does
+not need to win on — which makes the team's own latency a worst case. The
+syllabus's "when does multi-agent help" answer is partly "when sub-tasks are
+independent and can run in parallel"; this implementation deliberately does
+not exploit that, so a parallel version would close some of the latency gap,
+though not the structural cost/token gap.
+
+Building this surfaced two real, previously-undetected bugs in the existing
+race/snapshot machinery, both fixed as prerequisites: `arena --generate` had
+never actually called a real LLM (`compare_arms`' own `None`-means-dry
+convention was being used backwards), and `atasks --snapshot` never recorded
+which `--impl` had actually run, which would have made a `plain`-vs-`team`
+comparison falsely report "no configuration difference" on its own headline.
+
 ## Testing
 
 ```bash
-python -m pytest -q              # 687 tests, 1 skipped, ~7s
+python -m pytest -q              # 725 tests, 1 skipped, ~10s
 python -m pytest tests/test_grounding.py -q
 ```
 

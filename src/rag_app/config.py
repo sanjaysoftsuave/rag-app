@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,21 @@ class EvaluationConfig:
     geval_temperature: float = 1.0
     # Hard ceiling, checked BEFORE the first call rather than partway through.
     max_llm_calls: int = 200
+    # Dollars per 1M tokens, (prompt, completion), keyed by EXACT model name.
+    # Week 10: token counts are real, read off the API response's own `usage`
+    # field — no tokenizer dependency. A dollar figure built from them is a
+    # computation, not a guess, which is the distinction CLAUDE.md's prior
+    # "no cost figure" stance turned on. A model absent from this table prices
+    # as None, never 0 — see llm.price_usage. Rates below are illustrative,
+    # OpenRouter list prices circa 2025Q2; re-check before trusting them, the
+    # same honesty this repo already asks of score_threshold and RAGAS
+    # absolutes.
+    token_prices: dict[str, tuple[float, float]] = field(
+        default_factory=lambda: {
+            "openai/gpt-4o-mini": (0.15, 0.60),
+            "openai/gpt-4o": (2.50, 10.00),
+        }
+    )
 
 
 BUILTIN_TOOL_NAMES = (
@@ -161,6 +176,25 @@ class DefenceConfig:
 
 
 @dataclass(frozen=True)
+class TeamConfig:
+    """Week 10's manager-plus-two-specialists team. See team.py.
+
+    A specialist is narrowed by TOOL VISIBILITY, not a forked prompt — these
+    two tuples are the whole definition of "focused job". `search_tools` is
+    the retrieval specialist (broad recall); `verify_tools` is the
+    verification specialist (confirm one detail against a whole document).
+
+    Specialist budgets are deliberately smaller than the solo agent's: a
+    narrow tool set should need fewer steps to exhaust what it can even see.
+    """
+
+    search_tools: tuple[str, ...] = ("search_documents", "keyword_search")
+    verify_tools: tuple[str, ...] = ("list_sources", "read_source")
+    specialist_max_steps: int = 3
+    specialist_max_tool_calls: int = 4
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     """The ReAct loop's budgets and tool set.
 
@@ -195,6 +229,7 @@ class AgentConfig:
     read_source_allow: tuple[str, ...] = ()
     memory: AgentMemoryConfig = AgentMemoryConfig()
     defences: DefenceConfig = DefenceConfig()
+    team: TeamConfig = TeamConfig()
 
 
 @dataclass(frozen=True)
@@ -357,13 +392,19 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"evaluation.max_llm_calls is {max_llm_calls}; it is a ceiling on spending, "
             f"so it cannot be negative. Use 0 for no ceiling."
         )
+    prices_raw = e_raw.get("token_prices")
+    token_prices = (
+        {model: (float(p[0]), float(p[1])) for model, p in prices_raw.items()}
+        if prices_raw
+        else EvaluationConfig().token_prices
+    )
 
     a_raw = raw.get("agent") or {}
     m_raw = a_raw.get("memory") or {}
     implementation = str(a_raw.get("implementation", "plain"))
-    if implementation not in {"plain", "langgraph"}:
+    if implementation not in {"plain", "langgraph", "team"}:
         raise ValueError(
-            f"agent.implementation must be 'plain' or 'langgraph', got "
+            f"agent.implementation must be 'plain', 'langgraph' or 'team', got "
             f"{implementation!r}"
         )
     memory_backend = str(m_raw.get("backend", "plain"))
@@ -401,6 +442,28 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"{list(BUILTIN_TOOL_NAMES)}."
         )
 
+    t_raw = a_raw.get("team") or {}
+    search_tools = tuple(t_raw.get("search_tools", TeamConfig().search_tools))
+    verify_tools = tuple(t_raw.get("verify_tools", TeamConfig().verify_tools))
+    unknown = [t for t in (*search_tools, *verify_tools) if t not in BUILTIN_TOOL_NAMES]
+    if unknown:
+        raise ValueError(
+            f"agent.team names unknown tools {unknown}; known tools are "
+            f"{list(BUILTIN_TOOL_NAMES)}."
+        )
+    specialist_max_steps = int(t_raw.get("specialist_max_steps", 3))
+    if specialist_max_steps < 1:
+        raise ValueError(
+            f"agent.team.specialist_max_steps is {specialist_max_steps}, so a specialist "
+            f"would stop before its first thought and never return evidence."
+        )
+    specialist_max_tool_calls = int(t_raw.get("specialist_max_tool_calls", 4))
+    if specialist_max_tool_calls < 0:
+        raise ValueError(
+            f"agent.team.specialist_max_tool_calls is {specialist_max_tool_calls}; it is a "
+            f"ceiling, so it cannot be negative."
+        )
+
     q_raw = raw.get("qdrant") or {}
     llm_raw = raw["llm"]
 
@@ -436,6 +499,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             geval_samples=geval_samples,
             geval_temperature=geval_temperature,
             max_llm_calls=max_llm_calls,
+            token_prices=token_prices,
         ),
         agent=AgentConfig(
             implementation=implementation,
@@ -451,6 +515,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             read_source_allow=tuple(a_raw.get("read_source_allow", ()) or ()),
             defences=DefenceConfig(
                 **{k: bool(v) for k, v in d_raw.items()}
+            ),
+            team=TeamConfig(
+                search_tools=search_tools,
+                verify_tools=verify_tools,
+                specialist_max_steps=specialist_max_steps,
+                specialist_max_tool_calls=specialist_max_tool_calls,
             ),
             memory=AgentMemoryConfig(
                 enabled=bool(m_raw.get("enabled", False)),

@@ -1,6 +1,8 @@
 import pytest
+from conftest import make_config
 
 from rag_app.cli import build_parser
+from rag_app.evaluate import GoldQuestion
 from rag_app.filters import MetaFilter
 
 
@@ -213,6 +215,79 @@ def test_mcp_serve_defaults_to_stdio():
 def test_mcp_serve_rejects_an_unknown_transport():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["mcp-serve", "--transport", "carrier-pigeon"])
+
+
+# ---------------------------------------------------------------------------
+# Week 10: the team arm, and the arena --generate bug it exposed
+# ---------------------------------------------------------------------------
+
+
+def test_arena_selects_the_real_callables_when_generating():
+    """Pins the fix: arena --generate used to pass None, which compare_arms'
+    own `or` fallback silently read as 'use the dry stand-in' — so --generate
+    cost nothing and measured nothing, for both arms, with no error anywhere."""
+    from rag_app.agent import _call as agent_call
+    from rag_app.cli import _arena_callables
+    from rag_app.generate import generate_answer
+
+    assert _arena_callables(True) == (generate_answer, agent_call)
+
+
+def test_arena_selects_safe_dry_standins_without_generate():
+    from rag_app.cli import _arena_callables
+
+    generate_fn, llm_fn = _arena_callables(False)
+    assert generate_fn("q", None, 3) == "(dry run)"
+    assert "dry run" in llm_fn([], None).lower()
+
+
+def test_agent_impl_choices_include_team():
+    a = build_parser().parse_args(["agent", "q", "--impl", "team"])
+    assert a.impl == "team"
+
+
+def test_atasks_impl_choices_include_team():
+    a = build_parser().parse_args(["atasks", "--impl", "team"])
+    assert a.impl == "team"
+
+
+def test_arena_arms_help_mentions_team():
+    help_text = build_parser().format_help()
+    # Parsing a comma-joined --arms string is untyped by argparse (free text),
+    # so there is no choices list to assert against; this just confirms a
+    # value of "team" is accepted at all.
+    a = build_parser().parse_args(["arena", "--arms", "agent,team"])
+    assert a.arms == "agent,team"
+
+
+def test_cfg_for_impl_overrides_the_snapshotted_implementation(tmp_path):
+    """Pins the atasks --snapshot fix directly."""
+    from rag_app.cli import _cfg_for_impl
+
+    cfg = make_config(tmp_path)
+    assert cfg.agent.implementation == "plain"
+    assert _cfg_for_impl(cfg, "team").agent.implementation == "team"
+    assert _cfg_for_impl(cfg, None) is cfg  # no override named -> unchanged
+
+
+def test_atasks_snapshots_show_the_implementation_that_actually_ran(tmp_path):
+    """End to end through make_snapshot/compare: the exact scenario the
+    mentor checklist asks for - racing plain vs team on the same tasks and
+    being able to tell, from the snapshots alone, which arm is which."""
+    from rag_app.before_after import compare, make_snapshot
+    from rag_app.cli import _cfg_for_impl
+
+    cfg = make_config(tmp_path)
+    gold = [GoldQuestion(question="q", must_contain=["x"])]
+
+    before = make_snapshot("single-v1", _cfg_for_impl(cfg, "plain"), {"task_success": 1.0}, gold)
+    after = make_snapshot("team-v1", _cfg_for_impl(cfg, "team"), {"task_success": 1.0}, gold)
+
+    assert before.settings["agent_implementation"] == "plain"
+    assert after.settings["agent_implementation"] == "team"
+    result = compare(before, after)
+    assert ("agent_implementation", "plain", "team") in result.changed_settings
+    assert not any("no configuration difference" in w for w in result.warnings)
 
 
 def test_attach_mcp_tools_is_a_noop_without_any_mcp_flag():

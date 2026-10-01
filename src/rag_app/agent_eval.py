@@ -439,18 +439,39 @@ class AgentEvalReport:
     @property
     def cost_stats(self) -> dict[str, CostStat]:
         """Cost over ALL tasks, refusals included — a refusal costs money too,
-        and saying so is the point."""
+        and saying so is the point.
+
+        Week 10: "tokens" and "cost (usd)" read `result.meta["usage"]`, which
+        `agent._account`/`team.run_team` populate only when the caller passed
+        a `Usage` meter - a task with no meter contributes 0, same as every
+        other dim does for a task that never ran that far.
+        """
         dims = {
             "steps": lambda r: len(r.result.steps),
             "llm calls": lambda r: r.result.llm_calls,
             "tool calls": lambda r: r.result.tool_calls,
             "prompt chars": lambda r: r.result.prompt_chars,
             "wall clock (s)": lambda r: r.result.elapsed_s,
+            "tokens": lambda r: r.result.meta.get("usage", {}).get("total_tokens", 0),
+            "cost usd": lambda r: r.result.meta.get("usage", {}).get("cost_usd") or 0.0,
         }
         return {
             name: CostStat(name, [float(fn(r)) for r in self.results])
             for name, fn in dims.items()
         }
+
+    @property
+    def unpriced_tasks(self) -> list["TaskResult"]:
+        """Tasks that WERE metered but used a model `cost_usd` has no price
+        for - `cost_usd is None` there, so the "cost (usd)" dim above silently
+        reads it as 0. This is what makes that silence visible instead of
+        letting an unpriced run look like a free one."""
+        out = []
+        for r in self.results:
+            usage = r.result.meta.get("usage")
+            if usage is not None and usage.get("cost_usd") is None:
+                out.append(r)
+        return out
 
     def _cost_lines(self) -> list[str]:
         if not self.results:
@@ -463,7 +484,13 @@ class AgentEvalReport:
             f"    {'':<18}{'mean':>10}{'p99':>10}",
         ]
         for name, stat in stats.items():
-            lines.append(f"    {name:<18}{stat.mean:>10,.1f}{stat.p99:>10,.1f}")
+            # Dollars need more precision than calls/steps/seconds do, or a
+            # sub-cent-per-task cost (the common case on a cheap model) rounds
+            # to a useless 0.0.
+            places = 4 if name == "cost usd" else 1
+            lines.append(
+                f"    {name:<18}{stat.mean:>10,.{places}f}{stat.p99:>10,.{places}f}"
+            )
         lines.append("")
         if percentile_is_max(len(self.results), 99):
             lines.append(
@@ -472,10 +499,15 @@ class AgentEvalReport:
             lines.append(
                 "    interpolation. It only starts being a percentile above 100 tasks."
             )
-        lines.append(
-            "    Cost is calls, characters and seconds. A dollar figure needs a tokenizer"
-        )
-        lines.append("    and a price table this project does not carry.")
+        if self.unpriced_tasks:
+            lines.append(
+                f"    {len(self.unpriced_tasks)} of {len(self.results)} tasks used a model "
+                f"with no listed price - their cost reads as 0 above, not 'unknown'."
+            )
+            lines.append(
+                "    Add it to evaluation.token_prices in config.yaml before trusting the "
+                "cost mean."
+            )
         return lines
 
     @property
@@ -731,9 +763,74 @@ def agent_metrics(report: AgentEvalReport) -> dict[str, Any]:
         payload[f"failures_{mode.replace('-', '_')}"] = counts.get(mode, 0)
     for name, stat in stats.items():
         key = name.replace(" ", "_").replace("(s)", "s").strip("_")
-        payload[f"mean_{key}"] = round(stat.mean, 2)
-        payload[f"p99_{key}"] = round(stat.p99, 2)
+        # Dollars need more precision than calls/steps/seconds: a sub-cent
+        # per-task cost (the common case on a cheap model) rounds to a
+        # useless 0.0 at 2 places.
+        places = 6 if key == "cost_usd" else 2
+        payload[f"mean_{key}"] = round(stat.mean, places)
+        payload[f"p99_{key}"] = round(stat.p99, places)
     return payload
+
+
+def implementation_verdict(before: dict, after: dict) -> str:
+    """One honest paragraph on which arm the numbers support keeping.
+
+    Reads `task_success`, `mean_cost_usd`, `mean_tokens`, `mean_wall_clock_s`,
+    `mean_llm_calls` from two `agent_metrics()`-shaped dicts. A key missing
+    from either side is read as "not measured" for that axis, never guessed —
+    same precedent as `before_after.HIGHER_IS_BETTER`'s absence meaning "no
+    verdict". Quality is judged against the ONE-TASK-worth-of-noise floor
+    `before_after.Comparison.one_question_worth` already uses, computed the
+    same way here so the two never disagree about what counts as noise.
+    """
+    lines = []
+    q_before, q_after = before.get("task_success"), after.get("task_success")
+    n = after.get("n_answerable") or after.get("n_tasks") or 0
+    noise_floor = (1.0 / n) if n else 0.0
+    quality_delta = None
+    if q_before is not None and q_after is not None:
+        quality_delta = q_after - q_before
+        if abs(quality_delta) < noise_floor:
+            lines.append(
+                f"Quality is a wash ({q_before:.1%} -> {q_after:.1%}, below the "
+                f"{noise_floor:.1%} one-task noise floor at n={n})."
+            )
+        elif quality_delta > 0:
+            lines.append(f"Quality improved: {q_before:.1%} -> {q_after:.1%} task success.")
+        else:
+            lines.append(f"Quality dropped: {q_before:.1%} -> {q_after:.1%} task success.")
+
+    def multiple(label, key, fmt):
+        b, a = before.get(key), after.get(key)
+        if b is None or a is None or b == 0:
+            return None
+        return f"{label} {a / b:.1f}x ({fmt(b)} -> {fmt(a)})"
+
+    cost_bits = [
+        s for s in (
+            multiple("cost", "mean_cost_usd", lambda v: f"${v:.4f}"),
+            multiple("tokens", "mean_tokens", lambda v: f"{v:,.0f}"),
+            multiple("LLM calls", "mean_llm_calls", lambda v: f"{v:.1f}"),
+            multiple("wall clock", "mean_wall_clock_s", lambda v: f"{v:.1f}s"),
+        )
+        if s
+    ]
+    if cost_bits:
+        lines.append("Cost: " + ", ".join(cost_bits) + ".")
+
+    if quality_delta is not None and abs(quality_delta) >= noise_floor:
+        verdict = "keep AFTER" if quality_delta > 0 else "keep BEFORE"
+        lines.append(f"VERDICT: {verdict} — quality moved beyond noise, cost is secondary.")
+    elif cost_bits and before.get("mean_cost_usd") and after.get("mean_cost_usd"):
+        cheaper = "AFTER" if after["mean_cost_usd"] < before["mean_cost_usd"] else "BEFORE"
+        lines.append(
+            f"VERDICT: keep {cheaper} — quality is a wash, so the cheaper arm wins."
+        )
+    else:
+        lines.append(
+            "VERDICT: not enough measured to call it — pass --generate on both sides."
+        )
+    return "\n".join(lines)
 
 
 def agent_report_to_json(report: AgentEvalReport) -> str:
@@ -762,7 +859,12 @@ def evaluate_agent(
     memory=None,
     generated: bool = False,
     runner=None,
+    usage=None,
 ) -> AgentEvalReport:
+    """`usage`, when given, is handed to every task so `cost_stats`'s
+    "tokens"/"cost usd" dims reflect the WHOLE run's real spend, not one task
+    at a time - `run_agent` and `team.run_team` both accept it, so this works
+    for either `runner` unchanged."""
     from rag_app.agent import run_agent
 
     run = runner or run_agent
@@ -775,7 +877,7 @@ def evaluate_agent(
             # its meaning and no existing number moves.
             result=run(
                 task.task, cfg, tools=tools.restrict(task.forbid_tools),
-                llm_fn=llm_fn, clock=clock, memory=memory,
+                llm_fn=llm_fn, clock=clock, memory=memory, usage=usage,
             ),
         )
         for task in tasks

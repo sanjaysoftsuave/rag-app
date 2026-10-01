@@ -65,7 +65,7 @@ from rag_app.generate import (
     sources_from_contexts,
 )
 from rag_app.injection import unwrap, wrap
-from rag_app.llm import chat_messages
+from rag_app.llm import Usage, chat_messages, usage_summary
 from rag_app.store import ScoredChunk
 from rag_app.tools import FINAL_ANSWER, ToolRegistry
 
@@ -449,7 +449,7 @@ def finalize(
     return result
 
 
-def _account(result, budget, steps, evidence) -> AgentResult:
+def _account(result, budget, steps, evidence, *, usage=None, cfg=None) -> AgentResult:
     """Copy what the run actually spent onto the result. Called on EVERY exit.
 
     Three of the six exits used to skip this, so the trajectories that spent the
@@ -460,12 +460,22 @@ def _account(result, budget, steps, evidence) -> AgentResult:
 
     One function rather than five assignments at each exit, because the bug was
     caused precisely by hand-copying five fields six times.
+
+    Week 10: `usage`/`cfg`, when both given, record REAL token counts and
+    declared cost into `result.meta["usage"]` here too - the same chokepoint,
+    so a budget-stopped run's partial spend is metered, not just a clean
+    finish. `llm.usage_summary` is the one place that math happens; this
+    function and `team.run_team` both call it rather than each computing it.
     """
     result.steps = steps
     result.evidence = evidence
     result.llm_calls = budget.llm_calls
     result.tool_calls = budget.tool_calls
     result.elapsed_s = budget.elapsed
+    if cfg is not None:
+        summary = usage_summary(usage, cfg)
+        if summary is not None:
+            result.meta["usage"] = summary
     return result
 
 
@@ -515,14 +525,22 @@ def run_agent(
     memory=None,
     clock=None,
     max_steps: int | None = None,
+    usage: "Usage | None" = None,
 ) -> AgentResult:
-    """Run the ReAct loop. Never raises: every failure becomes a stop_reason."""
+    """Run the ReAct loop. Never raises: every failure becomes a stop_reason.
+
+    `usage`, when given, meters the REAL token cost of this run - but only on
+    the INTERNAL default call path. An injected `llm_fn` is the caller's own
+    instrumentation (same precedent as `clock`, which only governs the
+    internal `Budget`); a custom llm_fn has no usage parameter to report
+    through, so it is a structural bypass, not a choice.
+    """
     if max_steps is not None:
         from dataclasses import replace
 
         cfg = replace(cfg, agent=replace(cfg.agent, max_steps=max_steps))
 
-    caller = llm_fn or _call
+    caller = llm_fn or (lambda messages, c: chat_messages(messages, c.llm, c, usage=usage))
     budget = Budget(cfg, clock=clock)
     result = AgentResult(question=question)
     steps: list[Step] = []
@@ -547,20 +565,20 @@ def run_agent(
                 result, tools, detections=detections, forged=forged_labels,
                 denied=denied_calls, question_rules=question_scan,
             )
-            return _stop(_account(result, budget, steps, evidence), *trip)
+            return _stop(_account(result, budget, steps, evidence, usage=usage, cfg=cfg), *trip)
 
         messages = build_prompt(question, tools, steps, memory_block)
         prompt_chars = sum(len(m["content"]) for m in messages)
         # Checked BEFORE the call, so an over-budget prompt costs nothing.
         trip = budget.check(next_prompt_chars=prompt_chars)
         if trip:
-            return _stop(_account(result, budget, steps, evidence), *trip)
+            return _stop(_account(result, budget, steps, evidence, usage=usage, cfg=cfg), *trip)
 
         try:
             raw = caller(messages, cfg)
         except Exception as exc:
             return _stop(
-                _account(result, budget, steps, evidence),
+                _account(result, budget, steps, evidence, usage=usage, cfg=cfg),
                 "llm-error",
                 f"the LLM call failed: {type(exc).__name__}: {exc}",
             )
@@ -585,7 +603,7 @@ def run_agent(
             )
             if budget.parse_failures > cfg.agent.max_parse_failures:
                 return _stop(
-                    _account(result, budget, steps, evidence),
+                    _account(result, budget, steps, evidence, usage=usage, cfg=cfg),
                     "unparseable",
                     f"the model failed to produce a parseable action "
                     f"{budget.parse_failures} times",
@@ -599,14 +617,14 @@ def run_agent(
             )
             return finalize(
                 question, action.tool_input, evidence,
-                _account(result, budget, steps, evidence),
+                _account(result, budget, steps, evidence, usage=usage, cfg=cfg),
             )
 
         key = (action.tool, normalize(action.tool_input))
         seen_actions[key] = seen_actions.get(key, 0) + 1
         if seen_actions[key] > cfg.agent.repeat_action_limit:
             return _stop(
-                _account(result, budget, steps, evidence),
+                _account(result, budget, steps, evidence, usage=usage, cfg=cfg),
                 "repeated-action",
                 f"the model called {action.tool} with the same input "
                 f"{seen_actions[key]} times and is not making progress",
@@ -625,7 +643,7 @@ def run_agent(
 
         if budget.tool_calls >= cfg.agent.max_tool_calls:
             return _stop(
-                _account(result, budget, steps, evidence),
+                _account(result, budget, steps, evidence, usage=usage, cfg=cfg),
                 "max-tool-calls",
                 f"stopped after {budget.tool_calls} tool calls - "
                 f"agent.max_tool_calls={cfg.agent.max_tool_calls}",

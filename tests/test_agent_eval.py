@@ -14,6 +14,7 @@ from rag_app.agent_eval import (
     TaskResult,
     agent_report_to_json,
     evaluate_agent,
+    implementation_verdict,
     load_agent_tasks,
     parse_agent_tasks,
 )
@@ -361,11 +362,43 @@ def test_cost_is_reported_over_every_task_including_refusals():
     assert stats["llm calls"].p99 >= stats["llm calls"].mean
 
 
-def test_cost_never_claims_a_dollar_figure():
+def test_cost_reads_zero_without_a_usage_meter():
+    """No meter means nothing was measured - the dim is present (every task
+    contributes a row) but reads 0, not a guessed number."""
     out = report_of([(task(), result())]).describe()
     assert "COST PER TASK" in out
-    assert "a price table this project does not carry" in out
-    assert "$" not in out
+    assert "tokens" in out
+    assert "cost usd" in out
+    stats = report_of([(task(), result())]).cost_stats
+    assert stats["tokens"].mean == 0.0
+    assert stats["cost usd"].mean == 0.0
+
+
+def test_cost_reports_a_real_dollar_figure_when_a_meter_was_used():
+    """Week 10: real tokens off the API's own response, priced from a
+    declared table - a computation, not the fabrication CLAUDE.md used to
+    rule out."""
+    metered = result(meta={"usage": {
+        "prompt_tokens": 1000, "completion_tokens": 500,
+        "total_tokens": 1500, "cost_usd": 0.01,
+    }})
+    report = report_of([(task(), metered)])
+    assert report.cost_stats["tokens"].mean == 1500.0
+    assert report.cost_stats["cost usd"].mean == pytest.approx(0.01)
+    assert report.unpriced_tasks == []
+
+
+def test_an_unpriced_model_reads_as_zero_cost_but_is_flagged_not_silently_guessed():
+    unpriced = result(meta={"usage": {
+        "prompt_tokens": 1000, "completion_tokens": 500,
+        "total_tokens": 1500, "cost_usd": None,
+    }})
+    report = report_of([(task(), unpriced)])
+    assert report.cost_stats["cost usd"].mean == 0.0  # the silent reading...
+    assert len(report.unpriced_tasks) == 1            # ...but not a silent one
+    out = report.describe()
+    assert "no listed price" in out
+    assert "token_prices" in out
 
 
 def test_the_arena_does_not_credit_the_agent_for_running_out_of_steps():
@@ -378,3 +411,53 @@ def test_the_arena_does_not_credit_the_agent_for_running_out_of_steps():
     assert _grade(unanswerable, "I don't know", True, "max-steps") is False
     # the workflow arm passes no stop_reason and is unaffected
     assert _grade(unanswerable, "I don't know", True) is True
+
+
+# ---------------------------------------------------------------------------
+# Week 10: the honest implementation_verdict paragraph
+# ---------------------------------------------------------------------------
+
+
+def test_a_clear_quality_win_recommends_after_regardless_of_cost():
+    before = {"task_success": 0.5, "n_answerable": 8, "mean_cost_usd": 0.001}
+    after = {"task_success": 1.0, "n_answerable": 8, "mean_cost_usd": 0.01}
+    out = implementation_verdict(before, after)
+    assert "Quality improved" in out
+    assert "VERDICT: keep AFTER" in out
+
+
+def test_a_clear_quality_loss_recommends_before_even_if_cheaper():
+    before = {"task_success": 1.0, "n_answerable": 8, "mean_cost_usd": 0.01}
+    after = {"task_success": 0.5, "n_answerable": 8, "mean_cost_usd": 0.001}
+    out = implementation_verdict(before, after)
+    assert "Quality dropped" in out
+    assert "VERDICT: keep BEFORE" in out
+
+
+def test_a_quality_wash_within_noise_falls_back_to_cost():
+    """At n=8 one task is 12.5% - a smaller delta is noise, not a finding."""
+    before = {"task_success": 0.75, "n_answerable": 8, "mean_cost_usd": 0.01,
+              "mean_tokens": 2000}
+    after = {"task_success": 0.75, "n_answerable": 8, "mean_cost_usd": 0.03,
+              "mean_tokens": 6000}
+    out = implementation_verdict(before, after)
+    assert "wash" in out
+    assert "VERDICT: keep BEFORE" in out
+    assert "3.0x" in out  # both cost and tokens tripled
+
+
+def test_missing_metrics_on_either_side_never_guesses_a_verdict():
+    out = implementation_verdict({}, {})
+    assert "not enough measured" in out
+
+
+def test_the_verdict_names_the_actual_multiples():
+    before = {"task_success": 0.8, "n_answerable": 9, "mean_cost_usd": 0.002,
+              "mean_tokens": 1000, "mean_llm_calls": 2.0, "mean_wall_clock_s": 1.5}
+    after = {"task_success": 0.8, "n_answerable": 9, "mean_cost_usd": 0.008,
+              "mean_tokens": 4000, "mean_llm_calls": 6.0, "mean_wall_clock_s": 3.0}
+    out = implementation_verdict(before, after)
+    assert "cost 4.0x" in out
+    assert "tokens 4.0x" in out
+    assert "LLM calls 3.0x" in out
+    assert "wall clock 2.0x" in out

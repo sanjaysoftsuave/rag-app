@@ -114,6 +114,15 @@ evaluation:
   geval_samples: 5
   geval_temperature: 1.0
   max_llm_calls: 200
+  # Week 10: dollars per 1M tokens, [prompt, completion], by EXACT model name.
+  # Token counts themselves are real (read off the API response's own `usage`
+  # field, no tokenizer needed) - this table is what turns them into a dollar
+  # figure. A model missing here prices as unknown, not free; `atasks` says so
+  # loudly rather than silently reading it as $0. Rates below are illustrative
+  # OpenRouter list prices circa 2025Q2 - re-check before trusting them.
+  token_prices:
+    openai/gpt-4o-mini: [0.15, 0.60]
+    openai/gpt-4o: [2.50, 10.00]
 
 # The ReAct agent (agent.py) - a SECOND control flow over the same retrieval
 # stages and the same grounding gate as ask(). Nothing here affects `ask`.
@@ -132,7 +141,7 @@ evaluation:
 # count needs a tokenizer dependency this project deliberately avoids - the
 # same honesty chunk_size already requires.
 agent:
-  implementation: plain     # plain | langgraph  (langgraph needs .[agents])
+  implementation: plain     # plain | langgraph | team
   max_steps: 6
   max_tool_calls: 8
   max_llm_calls: 8
@@ -148,6 +157,17 @@ agent:
     backend: plain          # plain | mem0  (mem0 needs .[mem0])
     short_term_turns: 8
     vector_recall_k: 3
+  # Week 10: the manager-plus-two-specialists team (team.py). A specialist is
+  # narrowed by TOOL VISIBILITY, not a second prompt - these two lists are the
+  # whole definition of "focused job". Specialist budgets default smaller than
+  # the solo agent's: a narrow tool set should need fewer steps to exhaust
+  # what it can even see. `python -m rag_app atasks --impl team` races it
+  # against `--impl plain` on the same data/agent_tasks.yaml.
+  team:
+    search_tools: [search_documents, keyword_search]
+    verify_tools: [list_sources, read_source]
+    specialist_max_steps: 3
+    specialist_max_tool_calls: 4
 
 llm:
   base_url: https://openrouter.ai/api/v1
