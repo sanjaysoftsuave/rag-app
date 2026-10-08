@@ -287,6 +287,28 @@ def test_chat_messages_records_real_usage_when_a_meter_is_given(tmp_path):
     assert u.by_model == {cfg.llm.model: (42, 7)}
 
 
+def test_generate_answer_threads_usage_to_chat_messages(tmp_path):
+    """Week 11: pipeline.ask()'s only token-cost gap, closed the same way
+    agent.py's was in Week 10 — one additive kwarg, nothing existing moves."""
+    from rag_app.generate import generate_answer
+    from rag_app.llm import Usage
+
+    cfg = make_config(tmp_path)
+    fake = FakeClient("the answer", usage=_FakeUsage(prompt_tokens=10, completion_tokens=5))
+    u = Usage()
+    text = generate_answer("q?", [], cfg, client=fake, usage=u)
+    assert text == "the answer"
+    assert u.by_model == {cfg.llm.model: (10, 5)}
+
+
+def test_generate_answer_with_no_meter_is_unaffected(tmp_path):
+    from rag_app.generate import generate_answer
+
+    cfg = make_config(tmp_path)
+    fake = FakeClient("the answer")
+    assert generate_answer("q?", [], cfg, client=fake) == "the answer"
+
+
 def test_chat_messages_with_no_meter_never_touches_usage(tmp_path):
     """The overwhelming majority of callers pass nothing; must stay a no-op."""
     cfg = make_config(tmp_path)

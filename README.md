@@ -106,6 +106,10 @@ genuinely easier without a browser:
 | `redteam [--arm defended\|undefended\|both]` | Run the injection suite and diff the arms. |
 | `mcp-serve [--transport stdio\|http] [--port N]` | Run this app's own MCP server (`search_documents`). |
 | `agent "..." [--mcp-stdio\|--mcp-command CMD\|--mcp-url URL] [--mcp-allow]` | Discover tools over MCP instead of hard-coding them. |
+| `logs [QUERY] [--since D] [--until D] [--id ID]` | Search or replay the per-request log. |
+| `logs --cost-report [--snapshot L]` | Mean/p99 latency, tokens, cost and cache hit rate. |
+| `logs --replay-gold [--generate] [--snapshot L]` | Seed real traffic from `data/gold.yaml` and measure it. |
+| `logs --id ID --promote-gold --must-contain T` | Turn one found failure into a permanent `data/gold.yaml` test. |
 
 **`eval` with no flags costs nothing.** Every scorer that calls an LLM has to be
 typed, requires `--generate`, prints its call estimate before the first request,
@@ -579,10 +583,62 @@ convention was being used backwards), and `atasks --snapshot` never recorded
 which `--impl` had actually run, which would have made a `plain`-vs-`team`
 comparison falsely report "no configuration difference" on its own headline.
 
+## 18. Watching the app: logging, real cost, and the failure → test loop
+
+Through Week 10 there was no logging, no request id, no persisted trace and
+no caching anywhere in this app — confirmed before building any of this.
+What DID exist, independently invented twice and never shared: the UI's
+per-stage timing proxies, and a one-answer-per-session generation memo — both
+the right idea, both ephemeral. [reqlog.py](src/rag_app/reqlog.py) promotes
+both into one durable module the CLI and the UI share, and closes the one gap
+Week 10 left: real token/cost tracking existed for the agent and the team, but
+never for `pipeline.ask()` — the app's actual primary surface.
+
+**The cache is keyed on `(question, retrieved chunk ids, model, preset)`.**
+Chunk ids catch a re-ingested corpus that changes what gets retrieved;
+`preset` catches a real gap found while wiring this in — `chunk_id` is
+POSITIONAL (`"doc.pdf::0"`), not a content hash, so two presets with
+different `chunk_size` can produce the same id over different text.
+`AnswerCache.clear()` plus the UI's "Run ingest" button calling it after every
+rebuild catches the one thing neither key component can: a re-ingest of the
+SAME preset that changes what an EXISTING chunk_id now contains.
+
+**The support drill's bad answer is planted, openly.** Real traffic cannot be
+relied on to produce a wrong answer on demand, so `logs --plant-bad-answer`
+appends ONE record marked `planted_for_drill=True` in the data itself — found
+by searching like any other entry, same disclosed-fabrication precedent
+`data/redteam/`'s attack corpus already set.
+
+**The failure → test step writes to `data/gold.yaml`, not a new file** —
+`logs --id ID --promote-gold --must-contain "..."` builds a `GoldQuestion`
+from a found record and appends it through the SAME `write_gold` function
+`eval`/`debug` already use, so the next `eval --generate` grades it with no
+second code path.
+
+```bash
+python -m rag_app logs "refund"                    # the drill: find it by a vague term
+python -m rag_app logs --id rq-...                  # full replay of one record
+python -m rag_app logs --id rq-... --promote-gold --must-contain "14 days"
+
+python -m rag_app logs --replay-gold --generate --snapshot cache-cold
+python -m rag_app logs --replay-gold --generate --snapshot cache-warm
+python -m rag_app compare cache-cold cache-warm     # cache_hit_rate up, cost/tokens down
+```
+
+Measured, real, on this corpus: `data/gold.yaml`'s questions through
+`logs --replay-gold --generate` ran for real at a mean 11,351 tokens and
+$0.0021 per request, 6.4s mean wall clock, on `openai/gpt-4o-mini`. Only the
+delta between two runs of the same questions means anything here — same
+precedent `before_after.py` already set for every other metric in this repo.
+
+Not built: semantic caching (exact-match is the honest win without a
+similarity threshold to get wrong) and model routing (the generation model is
+already the cheap one, so there is no honest cheaper tier to route to).
+
 ## Testing
 
 ```bash
-python -m pytest -q              # 725 tests, 1 skipped, ~10s
+python -m pytest -q              # 764 tests, 1 skipped, ~8s
 python -m pytest tests/test_grounding.py -q
 ```
 

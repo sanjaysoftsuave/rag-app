@@ -23,7 +23,7 @@ How the venv got fixed, in case it recurs: `pyvenv.cfg` pointed at a `home =` in
 ## Commands
 
 ```bash
-python -m pytest -q                    # 725 passed, 1 skipped, ~10s — real embedded Qdrant per test
+python -m pytest -q                    # 764 passed, 1 skipped, ~8s — real embedded Qdrant per test
 python -m pytest tests/test_grounding.py -q            # the four grounding guarantees
 python -m pytest tests/test_pdfs.py tests/test_explain.py -q   # PDF loading + UI introspection
 
@@ -44,6 +44,11 @@ python -m rag_app redteam --build-index                # build the SEPARATE atta
 python -m rag_app redteam [--arm defended|undefended|both] [--generate]
 python -m rag_app mcp-serve [--transport stdio|http] [--port N]   # this app's own MCP server
 python -m rag_app agent "..." --mcp-stdio [--mcp-allow]           # discover tools over MCP
+python -m rag_app logs [QUERY] [--since D] [--until D] [--id ID] [--json]   # search/replay
+python -m rag_app logs --cost-report [--snapshot L] [--note T]             # mean/p99 latency, tokens, cost
+python -m rag_app logs --replay-gold [--generate] [--snapshot L]           # seed real traffic + measure it
+python -m rag_app logs --plant-bad-answer                                  # the disclosed drill scenario
+python -m rag_app logs --id ID --promote-gold --must-contain T             # failure -> permanent test
 ```
 
 **`eval` with no flags makes zero LLM calls, and always will.** The substring
@@ -714,6 +719,105 @@ two. No team-level hard budget beyond each specialist's own
 `cfg.agent.team.specialist_max_steps`/`specialist_max_tool_calls` — the race
 measures total cost this week; it does not cap it further.
 
+### Watching the app: per-request logging, real cost, and the failure → test loop
+
+Through Week 10, the app had no logging, no request id, no persisted trace and
+no caching anywhere — confirmed by grepping the whole tree before building
+this. What DID exist, independently invented twice and never shared: `ui.py`'s
+`_Timed`/`TimedEmbedder`/`TimedReranker`/`TimedStore` proxy classes (per-stage
+timing by wrapping the injected deps, never instrumenting `ask()` — the right
+idea, just rebuilt fresh every Streamlit rerun and never persisted), and
+`tab_ask()`'s one-answer-per-session memo keyed on `(question, context chunk
+ids, model)` (the right cache key, just dying with the browser tab). Week 11
+is both of those, promoted into [reqlog.py](src/rag_app/reqlog.py) and made
+durable, plus the one gap Week 10 left: `llm.Usage`/`price_usage` were wired
+into `agent.run_agent`/`team.run_team`/`agent_langgraph.run_agent_langgraph`
+but never into `pipeline.ask()` — the app's actual primary surface had zero
+cost visibility until now.
+
+**`generate.generate_answer`/`pipeline.ask()` both gain one additive `usage=`
+kwarg**, same shape as Week 10's `run_agent(usage=)`: threads straight to
+`chat_messages(..., usage=usage)`, every existing caller passes nothing and is
+unaffected, and a caller-supplied `generate_fn` bypasses it — same documented
+precedent as `run_agent`'s custom `llm_fn`.
+
+**`reqlog.instrumented_ask()` is pure timing, no cache, no persistence** — the
+`TimedEmbedder`/`TimedReranker`/`TimedStore` classes moved here VERBATIM from
+`ui.py`, so the CLI's `ask`/`logs` commands get the same per-stage breakdown
+the UI always had, from one copy instead of two.
+
+**The cache is keyed on `(question, retrieved chunk ids, model, preset)` —
+not question text alone, and not chunk ids alone.** Including chunk ids means
+a re-ingested corpus that changes what gets retrieved invalidates the cache
+automatically. Including `preset` closes a real gap found while wiring this
+into `ui.py`: `Chunk.chunk_id` is POSITIONAL (`"doc.pdf::0"`), not a content
+hash, so two presets of the same corpus with different `chunk_size` produce
+the SAME id sequence over DIFFERENT text — without `preset` in the key, the
+same question against two presets could collide on one cached answer. Neither
+piece catches a re-ingest of the SAME preset that changes what an EXISTING
+chunk_id now contains (edited source text, or a `chunk_size` change that
+happens to reuse the same id sequence) — `AnswerCache.clear()` exists for
+exactly that, and `ui.py`'s "Run ingest" handler calls it after every rebuild,
+the same blunt-but-correct fix the old session-local memo already used.
+
+**`ui.py`'s `tab_ask()` does NOT call `reqlog.log_ask()`.** It needs finer
+control than a single `generate_fn` override can express: generation must be
+called for real ONLY when the user just clicked "Ask" this rerun (`do_generate
+and run`), never on a slider drag that merely reruns the script — but a CACHE
+HIT must still return instantly regardless, so nudging `score_threshold`
+doesn't lose an answer already paid for. So `tab_ask()` composes
+`instrumented_ask()` + `record_ask()` directly, with its own cache-or-skip-
+or-call decision in between — `record_ask()` exists specifically as the
+lower half of `log_ask()`, split out so a caller with its own instrumentation
+can still get one durable log line. `log_ask()` itself (used by `cmd_ask` and
+`logs --replay-gold`, neither of which has this per-rerun concern) is the
+convenience composition: cache check, real call, usage metering, log line, in
+one call.
+
+**The planted drill entry is marked, never hidden.** Real traffic cannot be
+relied on to produce a wrong answer on demand, and practising "find a bad
+answer from a vague complaint" needs one to find. `reqlog.plant_bad_answer()`
+appends ONE record with `planted_for_drill=True` set in the record itself —
+found by `logs` search like any other entry, same disclosed-fabrication
+precedent `data/redteam/`'s attack corpus already set.
+
+**The failure → test step writes to `data/gold.yaml`, not a new file.**
+`reqlog.promote_to_gold()` builds a `GoldQuestion` from a found record and
+appends it via the EXISTING `evaluate.write_gold` — the same file `eval`/
+`debug` already read, so a promoted entry is graded on the very next `eval
+--generate` with no second code path. The minimum-viable-entry rule is
+`parse_gold`'s own rule, checked here with the SAME message, so a promotion
+can never silently fail validation later: answerable (the default) and
+nothing to check for is rejected before any file is touched.
+
+```bash
+python -m rag_app logs "refund"                          # the support drill: find it by a vague term
+python -m rag_app logs --id rq-...                        # full replay of one record
+python -m rag_app logs --id rq-... --promote-gold --must-contain "14 days"
+python -m rag_app eval --generate                         # the promoted entry is graded, going forward
+
+python -m rag_app logs --replay-gold --generate --snapshot cache-cold --note "cache empty"
+python -m rag_app logs --replay-gold --generate --snapshot cache-warm --note "cache populated"
+python -m rag_app compare cache-cold cache-warm
+#   cache_hit_rate 0% -> high, mean_cost_usd / mean_tokens both down
+```
+
+**Measured, real, on this corpus:** `data/gold.yaml`'s questions through
+`logs --replay-gold --generate` ran the single ReAct-free workflow path for
+real — mean 11,351 tokens and $0.0021 per request, 6.4s mean wall clock, on
+`openai/gpt-4o-mini`. The cache's effect on a repeat pass is the number that
+matters here, not either absolute figure alone — same "only the delta between
+two runs of the same questions means anything" precedent `before_after.py`
+already set for every other metric in this repo.
+
+What is deliberately not built: semantic (fuzzy) caching — exact-match is
+simpler, deterministic to test, and the honest win available without a
+similarity threshold to tune and get wrong; model routing — the generation
+model is already the cheap one, so there is no honest cheaper tier to route
+to without inventing an artificial baseline; and promotion to
+`data/agent_tasks.yaml` for agent-path failures — this week's logging covers
+the workflow path only, the one with no prior cost visibility at all.
+
 ### MMR, query rewriting and HyDE are built and OFF by default
 
 Three optional stages, each a real change to what the model reads:
@@ -764,7 +868,7 @@ Swapping the model is a `config.yaml` edit plus a re-ingest. `StoreMeta.assert_c
 
 ### The test suite pays a real, measured cost for testing the real backend
 
-Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **725 passed, 1 skipped in ~10s** (measured, Python 3.14.7, with all three
+Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **764 passed, 1 skipped in ~8s** (measured, Python 3.14.7, with all three
 optional extras installed — `agents`, `mem0`, `mcp`; the skip is the without-langgraph branch, inverted for a test that only makes sense when the extra IS present).
 
 Still fully offline (no network, no model download) and fast enough to run on every change, just no longer near-instant. If a test needs to reopen a store it just built (proving a fix like the one above), it must explicitly `.close()` the first handle first — embedded mode holds a real file lock.

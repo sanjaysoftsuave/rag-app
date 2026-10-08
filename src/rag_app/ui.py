@@ -16,7 +16,6 @@ Run it with `python -m rag_app ui`, or `streamlit run app.py`.
 
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -48,9 +47,19 @@ from rag_app.explain import (
 from rag_app.filters import MetaFilter
 from rag_app.generate import generate_answer
 from rag_app.ingest import run_ingest
+from rag_app.llm import Usage
 from rag_app.pdfs import load_pdfs
-from rag_app.pipeline import ask, open_store
+from rag_app.pipeline import open_store
 from rag_app.qdrant_store import qdrant_path_for_preset, read_provenance
+from rag_app.reqlog import (
+    AnswerCache,
+    TimedEmbedder,
+    TimedReranker,
+    TimedStore,
+    cache_path,
+    instrumented_ask,
+    record_ask,
+)
 from rag_app.rerank import build_reranker
 from rag_app.store import StoreMeta
 
@@ -128,59 +137,9 @@ def close_handles(preset: str | None = None) -> None:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Stopwatch proxies — they delegate, they never change behaviour
-# ---------------------------------------------------------------------------
-
-
-class _Timed:
-    """Base proxy: forwards everything it does not explicitly time."""
-
-    def __init__(self, inner, sink: dict, label: str):
-        self._inner = inner
-        self._sink = sink
-        self._label = label
-
-    def _record(self, started: float) -> None:
-        self._sink[self._label] = self._sink.get(self._label, 0.0) + (
-            time.perf_counter() - started
-        )
-
-    def __getattr__(self, name):
-        return getattr(self._inner, name)
-
-
-class TimedEmbedder(_Timed):
-    def encode_queries(self, texts):
-        started = time.perf_counter()
-        try:
-            return self._inner.encode_queries(texts)
-        finally:
-            self._record(started)
-
-    def encode_documents(self, texts):
-        return self._inner.encode_documents(texts)
-
-
-class TimedReranker(_Timed):
-    def predict(self, pairs):
-        started = time.perf_counter()
-        try:
-            return self._inner.predict(pairs)
-        finally:
-            self._record(started)
-
-
-class TimedStore(_Timed):
-    def search(self, *args, **kwargs):
-        started = time.perf_counter()
-        try:
-            return self._inner.search(*args, **kwargs)
-        finally:
-            self._record(started)
-
-    def __len__(self):
-        return len(self._inner)
+# `TimedEmbedder`/`TimedReranker`/`TimedStore` used to live here. Week 11
+# promoted them to reqlog.py (verbatim) so the CLI's `ask`/`logs` commands get
+# the same per-stage timing this UI always had, instead of a second copy.
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +197,22 @@ def render_gate(gate, timings: dict, generated: bool) -> None:
             "Generation is off, so nothing was actually written — but retrieval, reranking "
             "and the score gate all ran for real, and this question cleared them."
         )
+
+
+def render_cost(record) -> None:
+    """Week 11: real per-request cost, and the id this request was logged
+    under — `python -m rag_app logs --id <that>` replays it from the log
+    alone, same record this renders from."""
+    if record.cache_hit:
+        st.caption(f"`{record.request_id}`  ·  served from cache — $0, 0 tokens")
+    elif record.usage:
+        cost = record.usage["cost_usd"]
+        cost_text = f"${cost:.6f}" if cost is not None else "unpriced model"
+        st.caption(
+            f"`{record.request_id}`  ·  {record.usage['total_tokens']} tokens  ·  {cost_text}"
+        )
+    else:
+        st.caption(f"`{record.request_id}`  ·  no generation call was metered")
 
 
 def render_timings(timings: dict) -> None:
@@ -475,7 +450,6 @@ def tab_ask(cfg: AppConfig, preset: str, flt: MetaFilter, do_generate: bool) -> 
         st.info("Build it from the **Add documents** tab, or run the command it names in a terminal.")
         return
 
-    timings: dict[str, float] = {}
     try:
         embedder, reranker = _models(cfg.bi_encoder_model, cfg.cross_encoder_model)
     except Exception as exc:  # model download / torch problems are worth naming
@@ -488,45 +462,49 @@ def tab_ask(cfg: AppConfig, preset: str, flt: MetaFilter, do_generate: bool) -> 
     # `score_threshold` and watching the gate flip work at all.
     #
     # Generation is neither cheap nor idempotent, so it is called ONLY on an
-    # explicit click, and its result is memoised on (question, exact context
-    # set, model). Nudging the threshold afterwards therefore keeps the answer
-    # on screen without paying for it twice; changing K or N changes the
-    # context set, the memo misses, and the answer honestly disappears rather
-    # than being shown next to excerpts that did not produce it.
-    cache: dict = st.session_state.setdefault("_generation_cache", {})
+    # explicit click, and its result is cached on (question, exact context
+    # set, model) — durably now, via reqlog.AnswerCache, not a per-session
+    # dict, so the memo survives across reruns, browser tabs and even the
+    # CLI's own `ask`/`logs --replay-gold`. Nudging the threshold afterwards
+    # therefore keeps the answer on screen without paying for it twice;
+    # changing K or N changes the context set, the memo misses, and the
+    # answer honestly disappears rather than being shown next to excerpts that
+    # did not produce it.
+    cache = AnswerCache(cache_path(cfg)) if cfg.cache.enabled else None
     produced_real_text = {"value": False}
+    cache_hit = {"value": False}
     allow_call = do_generate and run
+    usage = Usage()
 
     def generate_fn(q, contexts, config):
-        key = (q, tuple(c.chunk.chunk_id for c in contexts), config.llm.model)
-        if key in cache:
-            produced_real_text["value"] = True
-            return cache[key]
+        key = cache.key(q, contexts, config.llm.model, preset) if cache else None
+        if cache is not None:
+            cached = cache.get(key)
+            if cached is not None:
+                produced_real_text["value"] = True
+                cache_hit["value"] = True
+                return cached["text"]
         if not allow_call:
             # Retrieval-only: no network, but the real gate still runs, so
             # `gate` stays meaningful and the trace is honest about what ran.
             return skip_generation(q, contexts, config)
-        started = time.perf_counter()
-        try:
-            text = generate_answer(q, contexts, config)
-        finally:
-            timings["generate (LLM)"] = time.perf_counter() - started
-        cache[key] = text
+        text = generate_answer(q, contexts, config, usage=usage)
+        if cache is not None:
+            cache.put(key, {"text": text})
         produced_real_text["value"] = True
         return text
 
     bm25 = get_bm25(cfg, preset) if cfg.retrieval.mode == "hybrid" else None
 
-    started = time.perf_counter()
     try:
         with st.spinner("Running the pipeline…"):
-            answer = ask(
+            answer, timings = instrumented_ask(
                 question,
+                cfg,
                 preset=preset,
-                config=cfg,
-                store=TimedStore(store, timings, "retrieve (vector search)"),
-                embedder=TimedEmbedder(embedder, timings, "embed query"),
-                reranker=TimedReranker(reranker, timings, "rerank (cross-encoder)"),
+                store=store,
+                embedder=embedder,
+                reranker=reranker,
                 generate_fn=generate_fn,
                 flt=flt or None,
                 bm25=bm25,
@@ -534,7 +512,11 @@ def tab_ask(cfg: AppConfig, preset: str, flt: MetaFilter, do_generate: bool) -> 
     except Exception as exc:
         st.error(f"The pipeline raised: {exc}")
         return
-    timings["total"] = time.perf_counter() - started
+
+    record = record_ask(
+        question, cfg, answer, timings, preset=preset, usage=usage,
+        cache_hit=cache_hit["value"],
+    )
 
     gate = explain_gate(answer, cfg)
     rows = build_candidate_table(answer)
@@ -564,6 +546,7 @@ def tab_ask(cfg: AppConfig, preset: str, flt: MetaFilter, do_generate: bool) -> 
 
     st.divider()
     render_gate(gate, timings, generated)
+    render_cost(record)
 
     st.divider()
     st.markdown("### How that answer was produced")
@@ -813,10 +796,14 @@ def tab_ingest(cfg: AppConfig, preset: str) -> None:
             except Exception as exc:
                 st.error(f"Preset {name} failed: {exc}")
                 continue
-            # Memoised answers are keyed on chunk_id, which is stable across a
-            # re-ingest while the text behind it is not. Keeping them would show
-            # an old answer beside the new excerpts it was not generated from.
-            st.session_state.pop("_generation_cache", None)
+            # chunk_id is POSITIONAL ("doc.pdf::0"), not a content hash, so a
+            # re-ingest can change what an existing id contains (edited
+            # source text, or a chunk_size change reusing the same id
+            # sequence over different spans) without the cache key seeing
+            # it. Clearing beats a stale answer shown beside new excerpts it
+            # was never generated from.
+            if cfg.cache.enabled:
+                AnswerCache(cache_path(cfg)).clear()
             st.success(f"Preset {name} rebuilt.")
             st.code(report.describe(), language=None)
             for pdf in report.pdf_reports:

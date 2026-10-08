@@ -232,6 +232,10 @@ def test_token_and_cost_metrics_read_lower_as_better():
         assert HIGHER_IS_BETTER[key] is False
 
 
+def test_cache_hit_rate_reads_higher_as_better():
+    assert HIGHER_IS_BETTER["cache_hit_rate"] is True
+
+
 def test_a_run_note_records_a_code_change_settings_cannot_see(tmp_path):
     """settings_of records CONFIGURATION; most real interventions are code."""
     cfg = make_config(tmp_path)

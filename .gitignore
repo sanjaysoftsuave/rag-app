@@ -29,3 +29,9 @@ data/agent_memory/
 # artifact, because an exercise nobody else can reproduce proves nothing.
 # Its derived index (data/store/redteam/) and its run numbers are not.
 data/redteam/eval/
+
+# Week 11: per-request logs name your real questions and answers, and the
+# answer cache is a derived artifact of your corpus + model, same reasoning
+# as data/eval/ and data/store/ above.
+data/logs/
+data/cache/

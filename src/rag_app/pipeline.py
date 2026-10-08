@@ -76,6 +76,7 @@ def ask(
     flt: MetaFilter | None = None,
     bm25: BM25Index | None = None,
     transform_fn=None,
+    usage=None,
 ) -> Answer:
     cfg = config or load_config()
     name = preset or cfg.default_preset
@@ -176,7 +177,10 @@ def ask(
             meta=base_meta,
         )
 
-    gen = generate_fn or generate_answer
+    # `usage`, when given, only meters the INTERNAL default generator -- same
+    # precedent as agent.run_agent/team.run_team: a caller-supplied generate_fn
+    # is its own instrumentation and has no usage parameter to report through.
+    gen = generate_fn or (lambda q, c, cfg_: generate_answer(q, c, cfg_, usage=usage))
     text = gen(question, reranked, cfg)
 
     # ---- Gate 3: the model refused despite passing the score gate ----------

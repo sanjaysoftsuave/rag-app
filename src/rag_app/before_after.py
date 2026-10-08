@@ -89,6 +89,10 @@ HIGHER_IS_BETTER: dict[str, bool] = {
     "p99_tokens": False,
     "mean_cost_usd": False,
     "p99_cost_usd": False,
+    # Week 11: the cache improvement this metric exists to show. Unlike
+    # neutralized_spans/denied_tool_calls, more here IS unambiguously the
+    # point -- a higher hit rate is exactly what the cache is for.
+    "cache_hit_rate": True,
     # ---- injection / defence metrics --------------------------------------
     "injection_success_rate": False,
     "forged_citation_rate": False,

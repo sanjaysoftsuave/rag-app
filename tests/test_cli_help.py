@@ -309,3 +309,80 @@ def test_attach_mcp_tools_explains_the_missing_extra(monkeypatch):
     args = build_parser().parse_args(["agent", "q", "--mcp-stdio"])
     with pytest.raises(RuntimeError, match="pip install"):
         _attach_mcp_tools(args, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Week 11: the `logs` command's flags and their validation
+# ---------------------------------------------------------------------------
+
+
+def test_logs_parses_a_bare_search_query():
+    a = build_parser().parse_args(["logs", "refund"])
+    assert a.query == "refund"
+    assert a.id is None and a.cost_report is False
+
+
+def test_logs_defaults_to_no_query_and_no_action():
+    a = build_parser().parse_args(["logs"])
+    assert a.query is None
+    assert not any([a.cost_report, a.replay_gold, a.plant_bad_answer, a.promote_gold])
+
+
+def test_logs_promote_gold_needs_an_id():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "--promote-gold", "--must-contain", "x"])
+    msg = check_logs_args(a)
+    assert msg is not None and "--id" in msg
+
+
+def test_logs_promote_gold_needs_must_contain_or_unanswerable():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "--id", "rq-1", "--promote-gold"])
+    msg = check_logs_args(a)
+    assert msg is not None and "--must-contain" in msg
+
+
+def test_logs_promote_gold_with_must_contain_is_accepted():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(
+        ["logs", "--id", "rq-1", "--promote-gold", "--must-contain", "14 days"]
+    )
+    assert check_logs_args(a) is None
+
+
+def test_logs_promote_gold_with_unanswerable_is_accepted():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "--id", "rq-1", "--promote-gold", "--unanswerable"])
+    assert check_logs_args(a) is None
+
+
+def test_logs_replay_gold_and_plant_bad_answer_are_exclusive():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "--replay-gold", "--plant-bad-answer"])
+    assert check_logs_args(a) is not None
+
+
+def test_logs_cost_report_rejects_a_search_query():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "refund", "--cost-report"])
+    assert check_logs_args(a) is not None
+
+
+def test_logs_cost_report_alone_is_accepted():
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "--cost-report"])
+    assert check_logs_args(a) is None
+
+
+def test_logs_must_contain_is_repeatable():
+    a = build_parser().parse_args(
+        ["logs", "--id", "rq-1", "--must-contain", "a", "--must-contain", "b"]
+    )
+    assert a.must_contain == ["a", "b"]

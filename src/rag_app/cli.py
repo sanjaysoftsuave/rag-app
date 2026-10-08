@@ -18,6 +18,7 @@ browser, or needed to launch one:
   atasks   trajectory-level agent evaluation against data/agent_tasks.yaml
   redteam  run the injection suite against a separate attack index
   mcp-serve  run this app's own MCP server (search_documents, over stdio or HTTP)
+  logs     search/replay the per-request log, measure cost, promote a failure to a test
 
 Ingest deliberately has no CLI command: building the index is a UI action, so
 there is one place it happens rather than two that can drift apart.
@@ -237,6 +238,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1", help="HTTP transport only")
     p.add_argument("--port", type=int, default=8765, help="HTTP transport only")
 
+    p = sub.add_parser(
+        "logs",
+        help="Search the per-request log, replay one record, or turn a failure into a test",
+    )
+    p.add_argument("query", nargs="?", default=None, help="Substring search over question/answer/sources")
+    p.add_argument("--id", default=None, metavar="REQUEST_ID", help="Show one exact record in full")
+    p.add_argument("--since", default=None, metavar="ISO", help="Only records at/after this timestamp")
+    p.add_argument("--until", default=None, metavar="ISO", help="Only records at/before this timestamp")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--cost-report", action="store_true",
+        help="Aggregate latency/tokens/cost/cache-hit-rate instead of listing records",
+    )
+    p.add_argument(
+        "--replay-gold", action="store_true",
+        help="Run every data/gold.yaml question through log_ask, seeding real traffic",
+    )
+    p.add_argument("--generate", action="store_true", help="With --replay-gold: actually call the LLM")
+    p.add_argument("--snapshot", default=None, metavar="LABEL", help="With --cost-report/--replay-gold")
+    p.add_argument("--note", default=None, metavar="TEXT")
+    p.add_argument(
+        "--plant-bad-answer", action="store_true",
+        help="Append ONE disclosed, fabricated wrong-answer record for drill practice",
+    )
+    p.add_argument(
+        "--promote-gold", action="store_true",
+        help="With --id: append a data/gold.yaml regression test from that record",
+    )
+    p.add_argument("--must-contain", action="append", default=None, metavar="TEXT")
+    p.add_argument("--unanswerable", action="store_true")
+
     return parser
 
 
@@ -277,6 +310,30 @@ def check_eval_args(args) -> str | None:
             )
     if getattr(args, "limit", 0) < 0:
         return "--limit is a count of questions to score, so it cannot be negative."
+    return None
+
+
+def check_logs_args(args) -> str | None:
+    """Return an error message, or None. Pure: no config, no I/O.
+
+    `--promote-gold` needs a record to promote and something to check the
+    promoted entry for — the exact rule `reqlog.promote_to_gold`/`parse_gold`
+    themselves enforce, caught here first so the message appears before any
+    file is touched.
+    """
+    if args.promote_gold:
+        if not args.id:
+            return "--promote-gold needs --id REQUEST_ID to know which record to promote."
+        if not args.unanswerable and not args.must_contain:
+            return (
+                "--promote-gold needs to know what a CORRECT answer contains — add "
+                "--must-contain TEXT (repeatable), or --unanswerable if the app should "
+                "have refused."
+            )
+    if args.replay_gold and args.plant_bad_answer:
+        return "--replay-gold and --plant-bad-answer are different actions; run them separately."
+    if args.cost_report and (args.query or args.id):
+        return "--cost-report reports on the whole log; drop the search query/--id, or drop --cost-report."
     return None
 
 
@@ -941,18 +998,183 @@ def cmd_mcp_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _describe_cost_report(report) -> str:
+    if report["n_requests"] == 0:
+        return "No requests logged yet."
+    lines = [
+        f"{report['n_requests']} requests, cache hit rate {report['cache_hit_rate']:.1%}",
+        f"  latency     mean {report['mean_latency_s']:.3f}s   p99 {report['p99_latency_s']:.3f}s",
+        f"  tokens      mean {report['mean_tokens']:.0f}   p99 {report['p99_tokens']:.0f}",
+        f"  cost (usd)  mean {report['mean_cost_usd']:.6f}   p99 {report['p99_cost_usd']:.6f}",
+    ]
+    if report.get("unpriced_requests"):
+        lines.append(
+            f"  {report['unpriced_requests']} request(s) used a model with no listed "
+            f"price - their cost reads as 0 above, not 'unknown'."
+        )
+    return "\n".join(lines)
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    import json as _json
+    from dataclasses import asdict
+
+    from rag_app.reqlog import (
+        AnswerCache,
+        cache_path,
+        cost_report,
+        find_by_id,
+        load_log,
+        log_ask,
+        log_path,
+        plant_bad_answer,
+        promote_to_gold,
+        search_log,
+    )
+
+    problem = check_logs_args(args)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
+
+    cfg = load_config()
+    path = log_path(cfg)
+
+    if args.plant_bad_answer:
+        record = plant_bad_answer(
+            cfg,
+            question="What is the refund window for a cancelled subscription?",
+            wrong_answer="Refunds are issued within 7 days of cancellation, no exceptions.",
+            sources=["RAG-Test-Document-1.pdf"],
+        )
+        print(f"Planted {record.request_id} — openly marked planted_for_drill=True.")
+        print("Find it the way a real complaint would describe it, not by this id:")
+        print('  python -m rag_app logs "refund"')
+        return 0
+
+    if args.replay_gold:
+        from rag_app.evaluate import load_gold
+
+        try:
+            gold = load_gold(cfg)
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        try:
+            store, embedder, reranker, _ = _agent_context(cfg, args.preset)
+        except (FileNotFoundError, RuntimeError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if not args.generate:
+            print(
+                f"dry run: a scripted stand-in drives all {len(gold)} questions, so these "
+                f"numbers measure shape, not real cost. Pass --generate.",
+                file=sys.stderr,
+            )
+        cache = AnswerCache(cache_path(cfg)) if cfg.cache.enabled else None
+        gen = None if args.generate else (lambda q, c, cfg_: "(dry run)")
+        collected = []
+        try:
+            for g in gold:
+                _, record = log_ask(
+                    g.question, cfg, embedder=embedder, reranker=reranker, store=store,
+                    cache=cache, generate_fn=gen,
+                )
+                collected.append(record)
+        finally:
+            store.close()
+        report = cost_report(collected)
+        print(_json.dumps(report, indent=2) if args.json else _describe_cost_report(report))
+        if args.snapshot:
+            from rag_app.before_after import make_snapshot, snapshot_path, write_snapshot
+
+            write_snapshot(
+                make_snapshot(args.snapshot, cfg, report, gold, note=args.note or ""),
+                snapshot_path(cfg, args.snapshot),
+            )
+            print(f"Snapshot written to {snapshot_path(cfg, args.snapshot)}", file=sys.stderr)
+        return 0
+
+    if args.cost_report:
+        report = cost_report(load_log(path))
+        print(_json.dumps(report, indent=2) if args.json else _describe_cost_report(report))
+        if args.snapshot:
+            from rag_app.before_after import make_snapshot, snapshot_path, write_snapshot
+            from rag_app.evaluate import load_gold
+
+            try:
+                gold = load_gold(cfg)
+            except FileNotFoundError:
+                gold = []
+            write_snapshot(
+                make_snapshot(args.snapshot, cfg, report, gold, note=args.note or ""),
+                snapshot_path(cfg, args.snapshot),
+            )
+            print(f"Snapshot written to {snapshot_path(cfg, args.snapshot)}", file=sys.stderr)
+        return 0
+
+    records = load_log(path)
+
+    if args.id:
+        record = find_by_id(records, args.id)
+        if record is None:
+            print(f"No record {args.id!r} in {path}.", file=sys.stderr)
+            return 1
+        if args.promote_gold:
+            try:
+                q = promote_to_gold(
+                    record, cfg, must_contain=args.must_contain,
+                    unanswerable=args.unanswerable, note=args.note or "",
+                )
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            print(f"Promoted to data/gold.yaml: {q.question!r}")
+            print("Run `python -m rag_app eval --generate` to grade it going forward.")
+            return 0
+        print(_json.dumps(asdict(record), indent=2) if args.json else record.describe())
+        return 0
+
+    hits = search_log(records, query=args.query, since=args.since, until=args.until)[: args.limit]
+    if not hits:
+        print("No matching records." if records else f"The log is empty — nothing at {path} yet.")
+        return 0
+    if args.json:
+        print(_json.dumps([asdict(r) for r in hits], indent=2))
+    else:
+        for r in hits:
+            tag = "  [PLANTED]" if r.planted_for_drill else ""
+            print(f"{r.request_id}  {r.timestamp}  {r.question!r}{tag}")
+        print(f"\n({len(hits)} of {len(records)} shown; --id REQUEST_ID for full detail)")
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
+    from rag_app.reqlog import AnswerCache, cache_path, log_ask
+
     cfg = load_config()
     flt = MetaFilter.parse(args.filter)
-    answer = ask(
+    cache = AnswerCache(cache_path(cfg)) if cfg.cache.enabled else None
+    # Always logged -- "nobody is watching your app" means this is not an
+    # opt-in flag. Logging itself is free; `ask` already makes a real LLM
+    # call when the gate passes, so there is no new cost here.
+    answer, record = log_ask(
         args.question,
+        cfg,
         preset=args.preset,
-        config=cfg,
         embedder=Embedder(cfg.bi_encoder_model),
         reranker=build_reranker(cfg.cross_encoder_model),
         flt=flt or None,
+        cache=cache,
     )
     print(format_answer(answer, verbose=not args.quiet))
+    if not args.quiet:
+        cost = (
+            f", {record.usage['total_tokens']} tokens"
+            if record.usage and not record.cache_hit
+            else ", cached" if record.cache_hit else ""
+        )
+        print(f"\n[{record.request_id}  {record.timings.get('total', 0):.2f}s{cost}]", file=sys.stderr)
     return 0
 
 
@@ -1075,6 +1297,7 @@ _HANDLERS = {
     "atasks": cmd_atasks,
     "redteam": cmd_redteam,
     "mcp-serve": cmd_mcp_serve,
+    "logs": cmd_logs,
 }
 
 

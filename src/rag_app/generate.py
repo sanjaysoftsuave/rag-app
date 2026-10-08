@@ -165,6 +165,7 @@ def generate_answer(
     contexts: list[ScoredChunk],
     cfg: AppConfig,
     client: Any | None = None,
+    usage: Any | None = None,
 ) -> str:
     # Checked here, not left to llm.build_client, because generation is the one
     # caller that must fail loudly: the UI surfaces this message directly, and a
@@ -173,7 +174,7 @@ def generate_answer(
     if not cfg.llm_api_key:
         raise RuntimeError(MISSING_KEY)
     return chat_messages(
-        build_prompt(question, contexts), cfg.llm, cfg, client=client
+        build_prompt(question, contexts), cfg.llm, cfg, client=client, usage=usage
     )
 
 

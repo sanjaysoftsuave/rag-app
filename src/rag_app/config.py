@@ -208,7 +208,7 @@ class AgentConfig:
     before raising it.
     """
 
-    implementation: str = "plain"   # "plain" | "langgraph"
+    implementation: str = "plain"   # "plain" | "langgraph" | "team"
     max_steps: int = 6
     max_tool_calls: int = 8
     # Separate from max_steps because a parse failure burns an LLM call without
@@ -233,6 +233,21 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class CacheConfig:
+    """Week 11: the exact-match answer cache. See reqlog.py.
+
+    Keyed on (question, RETRIEVED CHUNK IDS, model) -- not on raw question
+    text alone -- so a re-ingested corpus that changes what gets retrieved
+    invalidates the cache automatically instead of serving a stale answer
+    over new context. `path=None` resolves to
+    `store_dir.parent / "cache" / "answers.json"`.
+    """
+
+    enabled: bool = True
+    path: Path | None = None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     docs_dir: Path
     tickets_dir: Path
@@ -251,6 +266,7 @@ class AppConfig:
     retrieval: RetrievalConfig = RetrievalConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
     agent: AgentConfig = AgentConfig()
+    cache: CacheConfig = CacheConfig()
 
 
 def judge_llm(cfg: AppConfig) -> LlmConfig:
@@ -464,6 +480,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"ceiling, so it cannot be negative."
         )
 
+    c_raw = raw.get("cache") or {}
     q_raw = raw.get("qdrant") or {}
     llm_raw = raw["llm"]
 
@@ -545,4 +562,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             timeout_seconds=float(llm_raw.get("timeout_seconds", 30.0)),
         ),
         llm_api_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("LLM_API_KEY"),
+        cache=CacheConfig(
+            enabled=bool(c_raw.get("enabled", True)),
+            path=_resolve(c_raw["path"]) if c_raw.get("path") else None,
+        ),
     )
