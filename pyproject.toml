@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rag-app"
 version = "0.1.0"
-description = "Plain-Python RAG over support tickets: dense retrieve + cross-encoder rerank + grounded generation via OpenRouter"
+description = "Plain-Python RAG over your own documents: dense retrieve + cross-encoder rerank + score gate + cited generation via OpenRouter"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

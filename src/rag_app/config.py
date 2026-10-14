@@ -15,6 +15,20 @@ ROOT = Path(__file__).resolve().parents[2]
 # orphans an existing store rather than breaking anything.
 DEFAULT_PRESET = "default"
 
+# The value .env.example ships with. A stranger who copies the file and runs
+# before pasting a key used to get a 401 "User not found" from OpenRouter, and
+# `doctor` reported the key as PASS. Found in Week 12's fresh-clone test.
+PLACEHOLDER_KEY = "sk-or-v1-your-key-here"
+
+
+def resolve_api_key(environ=os.environ) -> str | None:
+    """OPENROUTER_API_KEY, then LLM_API_KEY; blank or the placeholder is no key."""
+    for name in ("OPENROUTER_API_KEY", "LLM_API_KEY"):
+        value = (environ.get(name) or "").strip()
+        if value and value != PLACEHOLDER_KEY:
+            return value
+    return None
+
 
 @dataclass(frozen=True)
 class ChunkPreset:
@@ -561,7 +575,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             temperature=float(llm_raw["temperature"]),
             timeout_seconds=float(llm_raw.get("timeout_seconds", 30.0)),
         ),
-        llm_api_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("LLM_API_KEY"),
+        llm_api_key=resolve_api_key(),
         cache=CacheConfig(
             enabled=bool(c_raw.get("enabled", True)),
             path=_resolve(c_raw["path"]) if c_raw.get("path") else None,

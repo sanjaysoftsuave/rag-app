@@ -1,7 +1,7 @@
 import pytest
 import yaml
 
-from rag_app.config import DEFAULT_PRESET, load_config
+from rag_app.config import DEFAULT_PRESET, PLACEHOLDER_KEY, load_config, resolve_api_key
 
 
 def test_shipped_config_loads_one_chunking_configuration():
@@ -267,3 +267,20 @@ def test_a_judge_model_equal_to_the_generator_is_allowed_not_rejected(tmp_path):
     refuse, because seeing the self-preference effect is the teaching point."""
     cfg = load_config(_write_single(tmp_path, evaluation={"judge_model": "m"}))
     assert cfg.evaluation.judge_model == cfg.llm.model
+
+
+def test_the_env_example_placeholder_is_not_a_key():
+    """Found in the Week 12 fresh-clone test: copying .env.example and running
+    before pasting a key sent the placeholder to OpenRouter (401 "User not
+    found") while `doctor` reported the key as PASS."""
+    assert resolve_api_key({"OPENROUTER_API_KEY": PLACEHOLDER_KEY}) is None
+    assert resolve_api_key({"OPENROUTER_API_KEY": "  "}) is None
+    assert resolve_api_key({"OPENROUTER_API_KEY": PLACEHOLDER_KEY, "LLM_API_KEY": "real"}) == "real"
+    assert resolve_api_key({"OPENROUTER_API_KEY": "sk-or-v1-abc"}) == "sk-or-v1-abc"
+
+
+def test_env_example_ships_exactly_the_placeholder_config_recognises():
+    from rag_app.config import ROOT
+
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert f"OPENROUTER_API_KEY={PLACEHOLDER_KEY}" in text

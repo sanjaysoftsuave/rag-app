@@ -35,6 +35,7 @@ from statistics import median
 from typing import Any
 
 from rag_app.config import AppConfig
+from rag_app.evaluate import fold
 
 
 @dataclass(frozen=True)
@@ -89,8 +90,8 @@ def _grade(gold, text: str, refused: bool, stop_reason: str = "") -> bool:
         from rag_app.agent import BUDGET_STOPS
 
         return refused and stop_reason not in BUDGET_STOPS
-    low = (text or "").lower()
-    return all(s.lower() in low for s in gold.must_contain)
+    low = fold(text or "")
+    return all(fold(s) in low for s in gold.must_contain)
 
 
 @dataclass

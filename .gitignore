@@ -35,3 +35,9 @@ data/redteam/eval/
 # as data/eval/ and data/store/ above.
 data/logs/
 data/cache/
+
+# Week 12: data/sample/ (corpus + gold.yaml) IS committed — a stranger needs it
+# to reach a first answer. What running it produces is not.
+data/sample/logs/
+data/sample/eval/
+data/sample/cache/

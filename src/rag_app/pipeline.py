@@ -222,15 +222,20 @@ def ask(
     )
 
 
-def format_answer(answer: Answer, *, verbose: bool = True) -> str:
+def format_answer(answer: Answer, *, verbose: bool = True, skipped: bool = False) -> str:
+    """`skipped` means a stand-in ran instead of the model (no API key). `ask()`
+    still reports `used_llm=True` then, in the strict sense that a generate_fn
+    ran — so the summary says "skipped" and drops the no-citation warning,
+    which would otherwise flag a model that was never called."""
     score = "n/a" if answer.best_score == float("-inf") else f"{answer.best_score:.4f}"
+    used = "skipped" if skipped and answer.used_llm else answer.used_llm
     lines = [
         f"Answer: {answer.text}",
         f"Sources: {', '.join(answer.sources) if answer.sources else '(none)'}",
         (
             f"(K={len(answer.retrieved)} → N={len(answer.reranked)}; "
             f"best_score={score}; threshold={answer.meta.get('threshold')}; "
-            f"used_llm={answer.used_llm}; gate={answer.gate})"
+            f"used_llm={used}; gate={answer.gate})"
         ),
     ]
     if answer.hallucinated_citations:
@@ -238,7 +243,7 @@ def format_answer(answer: Answer, *, verbose: bool = True) -> str:
             f"!! HALLUCINATED CITATIONS (not in context): "
             f"{', '.join(answer.hallucinated_citations)}"
         )
-    if answer.used_llm and not answer.refused and not answer.meta.get("cited"):
+    if answer.used_llm and not skipped and not answer.refused and not answer.meta.get("cited"):
         lines.append("!! Model produced no citations; sources fell back to retrieved chunks.")
 
     if verbose:

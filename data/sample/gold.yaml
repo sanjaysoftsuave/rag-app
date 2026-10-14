@@ -1,0 +1,45 @@
+# Gold set for the bundled SAMPLE corpus (data/sample/corpus).
+#
+# Written by the same author as the sample documents, so it tests that the
+# PIPELINE works end to end — retrieval, the gate, generation, citations — not
+# that author's blind spots. A real gold set is written by someone reading
+# THEIR OWN documents; see gold.example.yaml at the repo root.
+#
+# Matching is case-insensitive substring. Run with:
+#   python -m rag_app eval --sample               # free: retrieval metrics only
+#   python -m rag_app eval --sample --generate    # ~11 LLM calls: answer accuracy
+
+- question: How long do I have to request a refund after cancelling?
+  must_contain: "14 days"
+
+- question: How long does an approved refund take to arrive?
+  must_contain: "10 business days"
+
+- question: When does a password reset link expire?
+  must_contain: "60 minutes"
+
+- question: How long is an account locked after too many failed sign-ins?
+  must_contain: "15 minutes"
+
+- question: I was charged twice for the same amount. What happened?
+  must_contain: "3 business days"
+  expect_in_chunk: "temporary authorization"
+
+- question: How long is an SMS verification code valid?
+  must_contain: "5 minutes"
+
+- question: What is the API rate limit on the Free plan?
+  must_contain: "60 requests"
+
+- question: What is the maximum number of rows in one CSV export?
+  must_contain: "100,000"
+
+# --- the corpus cannot answer these; the app must refuse ----------------
+- question: What is the street address of the support office?
+  unanswerable: true
+
+- question: Is there a discount for students?
+  unanswerable: true
+
+- question: Who is the CEO of Northwind Cloud?
+  unanswerable: true

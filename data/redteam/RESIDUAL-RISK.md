@@ -14,8 +14,11 @@ forged citations    14.3% undefended  ->   0.0% defended
 detector false positives                  100%  (3 of 3 clean control documents)
 ```
 
-Three of seven attacks still land. They are entries 1, 2 and 3 below, and they
-are the three this design cannot close — not bugs, not backlog.
+Three of seven attacks still land — `direct-1`, `frame-6` and `indirect-2`,
+entries 2, 3 and 4 below. Entry 1 is the class behind them (an instruction
+phrased as content), listed first because no pattern will ever catch it. These
+are what this design cannot close — not bugs, not backlog. (An earlier version
+of this paragraph said "entries 1, 2 and 3", which did not match the entries.)
 
 ---
 

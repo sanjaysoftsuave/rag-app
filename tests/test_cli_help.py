@@ -374,6 +374,18 @@ def test_logs_cost_report_rejects_a_search_query():
     assert check_logs_args(a) is not None
 
 
+def test_logs_dry_replay_cannot_be_snapshotted():
+    """Same rule atasks enforces: a scripted stand-in's shape must never be
+    saved as if it were real cost."""
+    from rag_app.cli import check_logs_args
+
+    a = build_parser().parse_args(["logs", "--replay-gold", "--snapshot", "x"])
+    msg = check_logs_args(a)
+    assert msg is not None and "--generate" in msg
+    ok = build_parser().parse_args(["logs", "--replay-gold", "--generate", "--snapshot", "x"])
+    assert check_logs_args(ok) is None
+
+
 def test_logs_cost_report_alone_is_accepted():
     from rag_app.cli import check_logs_args
 

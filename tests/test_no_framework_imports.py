@@ -45,6 +45,13 @@ CORE_MODULES = (
     "rag_app.memory",
     "rag_app.compare",
     "rag_app.agent_eval",
+    # Weeks 10-12: on the path that answers (team, reqlog) or that a stranger
+    # runs first (sample, doctor, report), so they get the same guard.
+    "rag_app.team",
+    "rag_app.reqlog",
+    "rag_app.sample",
+    "rag_app.doctor",
+    "rag_app.report",
 )
 
 FRAMEWORK_PREFIXES = ("langchain", "langgraph", "llama_index", "mem0", "mcp", "fastmcp")

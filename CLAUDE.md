@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
-Working: **Python 3.14.7**, `.venv` active, `pytest -q` green in ~3s. `streamlit 1.62.0` and `pypdf 6.15.0` installed.
+Working: **Python 3.14.7**, `.venv` active, `pytest -q` green in ~17s. `streamlit 1.62.0` and `pypdf 6.15.0` installed.
 
 **Use `python -m <tool>`, never the bare command.** `.venv/Scripts/*.exe` are console-script shims with an absolute interpreter path baked in at install time, and this venv was originally built at `D:\Notes\AI Learing\rag-app` on a different machine. `python.exe`/`pythonw.exe` were regenerated when the venv was repaired; every other shim (`pytest.exe`, `pip.exe`, `huggingface-cli.exe`, `torchrun.exe`, …) still points at the dead path and fails with *"Fatal error in launcher: Unable to create process"*. So:
 
@@ -18,12 +18,12 @@ python -m rag_app ui         # this one is fine either way — see below
 
 How the venv got fixed, in case it recurs: `pyvenv.cfg` pointed at a `home =` interpreter that does not exist here. Running `py -m venv .venv` over the existing directory rewrites `pyvenv.cfg` and the `python.exe` shims **while leaving `Lib/site-packages` intact** — repairing it without re-downloading ~2 GB of torch. That only works because the wheels are `cp314` and the new interpreter is also 3.14.
 
-[rag.cmd](rag.cmd) is a leftover from that broken period — it borrows `site-packages` via `PYTHONPATH`. Harmless, but unnecessary now that the venv works; prefer activating the venv.
+`rag.cmd`, a launcher from that broken period that borrowed `site-packages` via `PYTHONPATH`, was deleted in Week 12: it was machine-specific, its usage example (`eval --all`) was not a valid flag, and it was the first confusing thing a stranger would find at the repo root.
 
 ## Commands
 
 ```bash
-python -m pytest -q                    # 764 passed, 1 skipped, ~8s — real embedded Qdrant per test
+python -m pytest -q                    # 800 passed, 1 skipped, ~17s — real embedded Qdrant per test
 python -m pytest tests/test_grounding.py -q            # the four grounding guarantees
 python -m pytest tests/test_pdfs.py tests/test_explain.py -q   # PDF loading + UI introspection
 
@@ -49,6 +49,10 @@ python -m rag_app logs --cost-report [--snapshot L] [--note T]             # mea
 python -m rag_app logs --replay-gold [--generate] [--snapshot L]           # seed real traffic + measure it
 python -m rag_app logs --plant-bad-answer                                  # the disclosed drill scenario
 python -m rag_app logs --id ID --promote-gold --must-contain T             # failure -> permanent test
+python -m rag_app doctor                               # setup check: offline, no model loads, names the next step
+python -m rag_app quickstart [--question Q] [--rebuild] # build the SAMPLE index if missing, answer one question
+python -m rag_app report [--out PATH]                  # render every snapshot into docs/EVAL-REPORT.md
+python -m rag_app ask|chunks|eval|debug|logs --sample ... # same command, isolated to data/sample/
 ```
 
 **`eval` with no flags makes zero LLM calls, and always will.** The substring
@@ -59,7 +63,7 @@ score otherwise), the estimate is printed to stderr *before* the first call, and
 through. Calls per question, at `rerank_n=3`: judge 1, G-Eval `geval_samples` (5),
 RAGAS 4 plus 1 more for each question with a `reference_answer`.
 
-**There is no `ingest` command.** Building the index is a UI action (*Add documents → Run ingest*), deliberately in one place so the two surfaces cannot drift. `run_ingest()` is still a plain function and is what the tests call.
+**There is no `ingest` command.** Building the index is a UI action (*Add documents → Run ingest*), deliberately in one place so the two surfaces cannot drift. The two exceptions build indexes that are structurally incapable of touching `data/tickets`: `redteam --build-index` and `quickstart` (the bundled sample). `run_ingest()` is still a plain function and is what the tests call.
 
 `data/store/` is gitignored, so a fresh clone must add documents and build the index before `ask` works — `open_store()` raises `FileNotFoundError` pointing at the UI, and `run_ingest()` raises `ValueError` naming the accepted extensions.
 
@@ -499,10 +503,14 @@ resisted a payload that reached it.
 items this app actually touches (LLM01, 02, 04, 06, 08, 09) with the code path for
 each, and why the other four are out of scope rather than quietly skipped.
 
-Measured: **injection success 71.4% undefended -> 42.9% defended**, forged
-citations 14.3% -> 0%. The three survivors are entries 1-4 of
-`data/redteam/RESIDUAL-RISK.md`, which is a tracked artifact and part of the
-deliverable rather than a disclaimer.
+Measured **with the scripted `obedient_llm` stand-in, not a real model** (both
+snapshots say `generated: false`): injection success 71.4% undefended -> 42.9%
+defended, forged citations 14.3% -> 0%. That proves the defences ENGAGE; it
+says nothing yet about whether a real model resists a payload that reaches it —
+`redteam --generate` has not been run. The three attacks that still land
+(direct-1, frame-6, indirect-2) are entries 2-4 of
+`data/redteam/RESIDUAL-RISK.md`; entry 1 is the class behind them, which is a
+tracked artifact and part of the deliverable rather than a disclaimer.
 
 ### MCP: discovery instead of hard-coding, and a server this app owns
 
@@ -802,13 +810,18 @@ python -m rag_app compare cache-cold cache-warm
 #   cache_hit_rate 0% -> high, mean_cost_usd / mean_tokens both down
 ```
 
-**Measured, real, on this corpus:** `data/gold.yaml`'s questions through
-`logs --replay-gold --generate` ran the single ReAct-free workflow path for
-real — mean 11,351 tokens and $0.0021 per request, 6.4s mean wall clock, on
-`openai/gpt-4o-mini`. The cache's effect on a repeat pass is the number that
-matters here, not either absolute figure alone — same "only the delta between
-two runs of the same questions means anything" precedent `before_after.py`
-already set for every other metric in this repo.
+**A correction, kept here on purpose.** An earlier version of this paragraph
+said `logs --replay-gold --generate` "ran for real — mean 11,351 tokens and
+$0.0021 per request, 6.4s." It never ran. Those figures were
+`data/eval/single-v1.json`'s metrics — the Week 10 ReAct *agent* on the 8
+agent tasks, not the workflow path on the 13 gold questions — rounded and
+attributed to the wrong command. The request log held one planted line and no
+cache file existed, which is what exposed it. Week 12's fixes are the
+structural answer: every snapshot now records `generated` (real model or not),
+and `python -m rag_app report` renders numbers FROM snapshot files, so prose
+links to a generated report instead of retyping figures. The cache's real
+effect is whatever `compare cache-cold cache-warm` shows — see
+`docs/EVAL-REPORT.md`.
 
 What is deliberately not built: semantic (fuzzy) caching — exact-match is
 simpler, deterministic to test, and the honest win available without a
@@ -817,6 +830,101 @@ model is already the cheap one, so there is no honest cheaper tier to route
 to without inventing an artificial baseline; and promotion to
 `data/agent_tasks.yaml` for agent-path failures — this week's logging covers
 the workflow path only, the one with no prior cost visibility at all.
+
+### Shipping it: one starting point, a stranger's guide, and numbers that are generated
+
+Week 12 adds nothing to learn; it is graded on whether the app runs end to end
+from one starting point, whether a stranger can get it working from the README
+alone, whether the demo shows a real failure, and whether the numbers survive
+tough questions. An audit before building found it failed all four, and the
+fourth worst: a figure in this file had no run behind it (see the correction in
+the Week 11 section).
+
+**Numbers are generated, not typed.** That false figure got in because a
+snapshot could not say whether a real model produced it, and prose was typed by
+hand. So `evaluate.report_to_json` and `reqlog.cost_report` now emit
+`generated`, and [report.py](src/rag_app/report.py) renders every snapshot in
+`data/eval/` and `data/sample/eval/` into `docs/EVAL-REPORT.md` with a
+provenance label per snapshot — `real model`, **`SCRIPTED STAND-IN — NOT A
+REAL MODEL`**, `retrieval only`, or `PROVENANCE UNKNOWN` for snapshots that
+predate the flag. Known pairs (`single-v1`/`team-v1`, `cache-cold`/`cache-warm`,
+`rt-before`/`rt-after`) embed `before_after.compare(...).describe()` verbatim —
+no second diff implementation. A closing *Not yet measured* section lists what
+has no snapshot, so an absence is stated rather than merely unmentioned. Docs
+link to the report instead of retyping its numbers.
+
+**The sample corpus is isolated the way the red-team corpus is.**
+[sample.py](src/rag_app/sample.py)'s `sample_config()` is one
+`dataclasses.replace` redirecting BOTH `tickets_dir` (to `data/sample/corpus/`)
+and `store_dir` (to `data/store/sample/`). Because `gold_path`/`log_path`/
+`snapshot_path`/`cache_path` all anchor on `cfg.tickets_dir.parent`, the sample's
+gold set, request log, snapshots and cache isolate under `data/sample/` with no
+new path logic; a test pins that none of them can coincide with the real ones.
+It is idempotent, so `--sample` applied twice is still the sample. The six
+documents are synthetic and each says so in its own text; `data/sample/README.md`
+sits outside `corpus/` so it is never ingested. The sample gold set was written
+by the same author as the corpus — it proves the pipeline works, not that it
+finds what a stranger would ask.
+
+**`doctor` loads nothing.** `find_spec`, not import (no torch load);
+`read_provenance`, not `open_store` (no file lock); the key's presence only —
+never printed, never validated against the network. Every check is
+PASS/WARN/FAIL with the fix, and `next_step()` names the one command to run.
+
+**`quickstart` is the second CLI-ingest exception**, justified exactly as
+`redteam --build-index` is: it can only build the sample index, and a stranger
+must be able to reproduce it without a browser. Without a key it runs retrieval,
+reranking and the gate for real and says what to add.
+
+**Bugs found by building the pieces that consume them** — the same pattern as
+Week 8's trajectory metrics:
+
+1. **`logs --replay-gold` had always crashed** (`AttributeError: 'Namespace'
+   object has no attribute 'preset'`). Found by the end-to-end test. This is also
+   proof the Week 11 replay figure could never have been produced.
+2. **`cmd_ask` lost its error handling in Week 11** when it was routed through
+   `log_ask`: no index or no key printed a stack trace, after loading ~150 MB of
+   models. It now opens the store first and fails in one line, exit 1.
+3. **A dry `--replay-gold` wrote `"(dry run)"` answers into the real request
+   log**, polluting every later `--cost-report`. `record_ask` is now
+   `build_record` (pure) + `append_log`; the dry path never appends.
+4. **`promote_to_gold` deleted `data/gold.yaml`'s header** — the file's own
+   "DRAFT, not human-verified" warning — because `write_gold` rewrote the file
+   from scratch. It now keeps a leading `#` block.
+5. **`cost_report` averaged the planted drill record into real costs.** Planted
+   records are excluded and counted as `planted_excluded`.
+6. **A keyless run told the user "the model produced no citations"** about a
+   model that was never called, with `used_llm=True`. Found by running
+   `quickstart` keyless for real. `format_answer(skipped=True)` now prints
+   `used_llm=skipped` and drops the warning — the same "skipped, never yes" rule
+   the UI already followed.
+7. **Snippet matching did not fold whitespace**, so recall@3 read 90.9% on a
+   run where every expected snippet reached the model: PDF extraction stores
+   "18 widgets" as `18\n\nwidgets`. `evaluate.fold()` is now the one
+   normalisation for gold matching, used by `evaluate`, `agent_eval` and
+   `compare` alike. `main-v1` holds the old figure; `main-v1-fold` the fixed one.
+
+**What the first real measurement of the main path found** (`main-v1`,
+`cache-cold`/`cache-warm`, `debug --generate`): 9/9 answerable questions
+correct, 4/4 refusals, zero retrieval or generation failures — so the gold set
+is too easy to rank changes. The one real failure is **"What did ticket CS-9999
+conclude?"**: its best excerpt scores 0.9755, above a genuinely answerable
+question at 0.9447, so no `score_threshold` can refuse it without a false
+refusal. The gate passes it and the model refuses (`gate=model-refused`).
+Gate-only refusal accuracy is therefore 75%, and 100% with the model. An
+unknown-identifier check before the gate is the obvious fix and is not built.
+`docs/DEMO.md` part 2 is this case.
+
+[tests/test_end_to_end.py](tests/test_end_to_end.py) drives `cli.main([...])` —
+real argparse, dispatch, embedded Qdrant and files — through quickstart → ask →
+logs → promote → eval → report, with only the models and LLM faked. It exists
+because every one of the bugs above lived in a seam between modules that each
+had their own passing tests.
+
+**The README is now a ~140-line stranger guide**; the 18-topic curriculum moved
+verbatim to [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) (links rewritten only).
+[docs/WEAK-SPOTS.md](docs/WEAK-SPOTS.md) gives every known limit with its
+consequence. `rag.cmd` was deleted.
 
 ### MMR, query rewriting and HyDE are built and OFF by default
 
@@ -868,7 +976,7 @@ Swapping the model is a `config.yaml` edit plus a re-ingest. `StoreMeta.assert_c
 
 ### The test suite pays a real, measured cost for testing the real backend
 
-Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **764 passed, 1 skipped in ~8s** (measured, Python 3.14.7, with all three
+Tests build genuine embedded `QdrantStore` instances (`tests/conftest.py::make_qdrant_store`), not a numpy-shaped stand-in — there is no lighter-weight fake backend to fall back to since numpy was removed everywhere, including tests. Slower than a numpy-backed suite's ~0.6s, still fast enough to run on every change: **800 passed, 1 skipped in ~17s** (measured, Python 3.14.7, with all three
 optional extras installed — `agents`, `mem0`, `mcp`; the skip is the without-langgraph branch, inverted for a test that only makes sense when the extra IS present).
 
 Still fully offline (no network, no model download) and fast enough to run on every change, just no longer near-instant. If a test needs to reopen a store it just built (proving a fix like the one above), it must explicitly `.close()` the first handle first — embedded mode holds a real file lock.
@@ -925,4 +1033,4 @@ API key resolution is `OPENROUTER_API_KEY`, falling back to `LLM_API_KEY`.
 - `data/traces/sample_seed42_n20*.{jsonl,md}` are **stale**: they were generated against the deleted `.jsonl` ticket corpus (`TIC-1001`..`TIC-1035`) and a `sample` command that no longer exists. The current batch is `sample_current_n20*`. The old files are kept only as a format reference.
 - `data/redteam/` is deliberately NOT gitignored: an attack corpus nobody else can
   reproduce proves nothing. Its derived index and run numbers are ignored.
-- The honest limits on the evaluation numbers here: the gold set is 13 questions (9 answerable), the human label set is 20 traces, G-Eval has no logprobs, RAGAS absolute values do not transfer across corpora, and the judge is validated against **one person's** labels — so "agreement" means agreement with you.
+- The honest limits on the evaluation numbers here: the gold set is 13 questions (9 answerable), the human label sheet is 20 traces and still EMPTY (so the judge is unvalidated), G-Eval has no logprobs, RAGAS absolute values do not transfer across corpora, and the judge is validated against **one person's** labels — so "agreement" means agreement with you.

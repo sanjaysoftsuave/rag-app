@@ -374,7 +374,7 @@ def find_by_id(records: list[RequestLog], request_id: str) -> RequestLog | None:
     return None
 
 
-def cost_report(records: list[RequestLog]) -> dict[str, Any]:
+def cost_report(records: list[RequestLog], *, generated: bool = True) -> dict[str, Any]:
     """Mean/p99 latency, tokens and cost, plus the cache hit rate.
 
     Reuses `agent_eval.percentile` (nearest-rank, no interpolation) rather
@@ -386,16 +386,29 @@ def cost_report(records: list[RequestLog]) -> dict[str, Any]:
     cost — same "None, not 0" precedent RAGAS and Week 10's `unpriced_tasks`
     already set, so `unpriced_requests` is counted separately rather than
     letting that 0 pass as a real measurement.
+
+    `planted_for_drill` records are EXCLUDED and counted separately: a
+    fabricated drill entry has no timings and no usage, so averaging it in
+    would drag every mean toward zero with a request that never happened.
+    `generated` says whether a real model produced these requests, so a
+    snapshot of this report can never be quoted as a real number it isn't.
     """
+    planted = sum(1 for r in records if r.planted_for_drill)
+    records = [r for r in records if not r.planted_for_drill]
     if not records:
-        return {"n_requests": 0, "cache_hit_rate": 0.0}
+        return {
+            "generated": generated, "n_requests": 0, "cache_hit_rate": 0.0,
+            "planted_excluded": planted,
+        }
     hits = sum(1 for r in records if r.cache_hit)
     unpriced = sum(1 for r in records if r.usage and r.usage.get("cost_usd") is None)
     latencies = [r.timings.get("total", 0.0) for r in records]
     tokens = [float(r.usage.get("total_tokens", 0)) if r.usage else 0.0 for r in records]
     costs = [float(r.usage.get("cost_usd") or 0.0) if r.usage else 0.0 for r in records]
     return {
+        "generated": generated,
         "n_requests": len(records),
+        "planted_excluded": planted,
         "cache_hit_rate": round(hits / len(records), 4),
         "unpriced_requests": unpriced,
         "mean_latency_s": round(sum(latencies) / len(latencies), 4),
@@ -405,6 +418,39 @@ def cost_report(records: list[RequestLog]) -> dict[str, Any]:
         "mean_cost_usd": round(sum(costs) / len(costs), 6),
         "p99_cost_usd": round(percentile(costs, 99), 6),
     }
+
+
+def build_record(
+    question: str,
+    cfg: AppConfig,
+    answer: Answer,
+    timings: dict[str, float],
+    *,
+    preset: str | None = None,
+    usage: Usage | None = None,
+    cache_hit: bool = False,
+) -> RequestLog:
+    """A `RequestLog` from an already-computed `(Answer, timings)` pair,
+    WITHOUT writing it anywhere. Pure, so a dry run (`logs --replay-gold`
+    without `--generate`) can still produce a cost report of its own shape
+    while never polluting the real request log with "(dry run)" answers."""
+    return RequestLog(
+        request_id=_new_request_id(),
+        timestamp=_now_iso(),
+        question=question,
+        answer_text=answer.text,
+        sources=list(answer.sources),
+        refused=answer.refused,
+        gate=answer.gate,
+        hallucinated_citations=list(answer.hallucinated_citations),
+        bi_encoder_model=cfg.bi_encoder_model,
+        cross_encoder_model=cfg.cross_encoder_model,
+        llm_model=cfg.llm.model,
+        preset=preset or cfg.default_preset,
+        timings=timings,
+        usage=usage_summary(usage, cfg),
+        cache_hit=cache_hit,
+    )
 
 
 def record_ask(
@@ -425,22 +471,8 @@ def record_ask(
     real LLM (never pay for a slider drag) — can still get one durable log
     line without going through `log_ask`'s own cache/usage composition.
     """
-    record = RequestLog(
-        request_id=_new_request_id(),
-        timestamp=_now_iso(),
-        question=question,
-        answer_text=answer.text,
-        sources=list(answer.sources),
-        refused=answer.refused,
-        gate=answer.gate,
-        hallucinated_citations=list(answer.hallucinated_citations),
-        bi_encoder_model=cfg.bi_encoder_model,
-        cross_encoder_model=cfg.cross_encoder_model,
-        llm_model=cfg.llm.model,
-        preset=preset or cfg.default_preset,
-        timings=timings,
-        usage=usage_summary(usage, cfg),
-        cache_hit=cache_hit,
+    record = build_record(
+        question, cfg, answer, timings, preset=preset, usage=usage, cache_hit=cache_hit,
     )
     append_log(record, file or log_path(cfg))
     return record

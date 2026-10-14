@@ -19,6 +19,9 @@ browser, or needed to launch one:
   redteam  run the injection suite against a separate attack index
   mcp-serve  run this app's own MCP server (search_documents, over stdio or HTTP)
   logs     search/replay the per-request log, measure cost, promote a failure to a test
+  doctor   check the install, key, index and data files; print the next step (free)
+  quickstart  zero to a cited answer on the bundled sample corpus
+  report   render every saved snapshot into one report, with provenance (free)
 
 Ingest deliberately has no CLI command: building the index is a UI action, so
 there is one place it happens rather than two that can drift apart.
@@ -46,6 +49,13 @@ from rag_app.rerank import RERANKER_REGISTRY, build_reranker, reranker_spec
 DRY_AGENT_TURN = "Thought: dry run\nAction: final_answer\nAction Input: (dry run)"
 
 
+def _add_sample_flag(p) -> None:
+    p.add_argument(
+        "--sample", action="store_true",
+        help="Use the bundled sample corpus and its own isolated index (see quickstart)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rag_app",
@@ -70,8 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metadata filter, repeatable (e.g. --filter source_type=pdf)",
     )
     p.add_argument("--quiet", action="store_true", help="Hide retrieve/rerank debug lists")
+    _add_sample_flag(p)
 
     p = sub.add_parser("chunks", help="Preview chunking without embedding anything")
+    _add_sample_flag(p)
     p.add_argument("--preset", default=None)
     p.add_argument("--all", action="store_true", help="Every configured preset")
     p.add_argument("--show", type=int, default=0, help="Print the first N chunks verbatim")
@@ -107,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--note", default=None, metavar="TEXT",
         help="What you changed. Recorded in the snapshot and printed first by `compare`",
     )
+    _add_sample_flag(p)
 
     p = sub.add_parser(
         "debug",
@@ -119,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Call the LLM to resolve 'unconfirmed' into pass/generation",
     )
     p.add_argument("--show-pass", action="store_true", help="Also list questions that passed")
+    _add_sample_flag(p)
 
     p = sub.add_parser(
         "codes",
@@ -269,6 +283,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--must-contain", action="append", default=None, metavar="TEXT")
     p.add_argument("--unanswerable", action="store_true")
+    # --replay-gold opens a store and reads args.preset. Without this flag the
+    # whole action crashed with AttributeError from the day it was written —
+    # found by the Week 12 end-to-end test, which is the only test that ever
+    # drove it through argparse.
+    p.add_argument("--preset", default=None)
+    _add_sample_flag(p)
+
+    sub.add_parser(
+        "doctor",
+        help="Check the install, key, index and data files; print the next step. Free, offline",
+    )
+
+    p = sub.add_parser(
+        "quickstart",
+        help="Zero to a cited answer: build the bundled sample index, then ask one question",
+    )
+    p.add_argument("--question", default=None, help="Ask this instead of the default sample question")
+    p.add_argument("--rebuild", action="store_true", help="Rebuild the sample index even if it exists")
+
+    p = sub.add_parser(
+        "report",
+        help="Render every saved snapshot into one markdown report, with provenance. Free",
+    )
+    p.add_argument(
+        "--out", default=None, metavar="PATH",
+        help="Where to write it (default docs/EVAL-REPORT.md)",
+    )
 
     return parser
 
@@ -332,6 +373,12 @@ def check_logs_args(args) -> str | None:
             )
     if args.replay_gold and args.plant_bad_answer:
         return "--replay-gold and --plant-bad-answer are different actions; run them separately."
+    if args.replay_gold and args.snapshot and not args.generate:
+        return (
+            "--snapshot saves a cost snapshot for `compare`, but without --generate a "
+            "scripted stand-in answers every question, so the snapshot would record the "
+            "harness's shape as if it were real cost. Add --generate, or drop --snapshot."
+        )
     if args.cost_report and (args.query or args.id):
         return "--cost-report reports on the whole log; drop the search query/--id, or drop --cost-report."
     return None
@@ -361,7 +408,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print(problem, file=sys.stderr)
         return 1
 
-    cfg = load_config()
+    cfg = _load_cfg(args)
     gold = _load_gold_or_explain(args, cfg)
     if gold is None:
         return 1
@@ -517,7 +564,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 def cmd_debug(args: argparse.Namespace) -> int:
     from rag_app.evaluate import label_failures
 
-    cfg = load_config()
+    cfg = _load_cfg(args)
     gold = _load_gold_or_explain(args, cfg)
     if gold is None:
         return 1
@@ -1021,9 +1068,11 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
     from rag_app.reqlog import (
         AnswerCache,
+        build_record,
         cache_path,
         cost_report,
         find_by_id,
+        instrumented_ask,
         load_log,
         log_ask,
         log_path,
@@ -1037,15 +1086,25 @@ def cmd_logs(args: argparse.Namespace) -> int:
         print(problem, file=sys.stderr)
         return 1
 
-    cfg = load_config()
+    cfg = _load_cfg(args)
     path = log_path(cfg)
 
     if args.plant_bad_answer:
+        from rag_app.docs import citation_label
+
+        # A label that actually exists in THIS corpus, so the planted record is
+        # indistinguishable in shape from a real one — that is the drill. It
+        # used to hard-code one machine's PDF filename.
+        docs = sorted(
+            p for p in cfg.tickets_dir.glob("*")
+            if p.suffix.lower() in {".md", ".txt", ".pdf"}
+        )
+        source = citation_label(docs[0].name) if docs else "unknown-document"
         record = plant_bad_answer(
             cfg,
             question="What is the refund window for a cancelled subscription?",
             wrong_answer="Refunds are issued within 7 days of cancellation, no exceptions.",
-            sources=["RAG-Test-Document-1.pdf"],
+            sources=[source],
         )
         print(f"Planted {record.request_id} — openly marked planted_for_drill=True.")
         print("Find it the way a real complaint would describe it, not by this id:")
@@ -1072,18 +1131,27 @@ def cmd_logs(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         cache = AnswerCache(cache_path(cfg)) if cfg.cache.enabled else None
-        gen = None if args.generate else (lambda q, c, cfg_: "(dry run)")
         collected = []
         try:
             for g in gold:
-                _, record = log_ask(
-                    g.question, cfg, embedder=embedder, reranker=reranker, store=store,
-                    cache=cache, generate_fn=gen,
-                )
+                if args.generate:
+                    _, record = log_ask(
+                        g.question, cfg, embedder=embedder, reranker=reranker, store=store,
+                        cache=cache,
+                    )
+                else:
+                    # A dry run measures SHAPE and must never write "(dry run)"
+                    # answers into the real request log, where every later
+                    # --cost-report would average them in as real traffic.
+                    answer, timings = instrumented_ask(
+                        g.question, cfg, embedder=embedder, reranker=reranker, store=store,
+                        generate_fn=lambda q, c, cfg_: "(dry run)",
+                    )
+                    record = build_record(g.question, cfg, answer, timings)
                 collected.append(record)
         finally:
             store.close()
-        report = cost_report(collected)
+        report = cost_report(collected, generated=args.generate)
         print(_json.dumps(report, indent=2) if args.json else _describe_cost_report(report))
         if args.snapshot:
             from rag_app.before_after import make_snapshot, snapshot_path, write_snapshot
@@ -1149,25 +1217,169 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ask(args: argparse.Namespace) -> int:
+NO_KEY_SKIP = (
+    "(generation skipped — no OPENROUTER_API_KEY. Copy .env.example to .env and "
+    "set your key; retrieval, reranking and the gate above all ran for real.)"
+)
+
+
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    from rag_app.doctor import FAIL, describe, run_checks
+
+    checks = run_checks(load_config())
+    print(describe(checks))
+    return 1 if any(c.status == FAIL for c in checks) else 0
+
+
+def cmd_quickstart(args: argparse.Namespace) -> int:
+    """Zero to a cited answer, for someone who has never run this before."""
+    from rag_app.pipeline import open_store
     from rag_app.reqlog import AnswerCache, cache_path, log_ask
+    from rag_app.sample import (
+        SAMPLE_QUESTION,
+        build_sample_index,
+        sample_config,
+        sample_index_exists,
+    )
 
     cfg = load_config()
+    scfg = sample_config(cfg)
+    if not any(scfg.tickets_dir.glob("*.md")):
+        print(
+            f"The bundled sample corpus is missing from {scfg.tickets_dir}. It ships with the "
+            f"repo — restore it with: git checkout -- data/sample",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Loading the embedding model (the first run downloads ~150 MB)...", file=sys.stderr)
+    embedder = Embedder(cfg.bi_encoder_model)
+    if args.rebuild or not sample_index_exists(cfg):
+        try:
+            report = build_sample_index(cfg, embedder=embedder)
+        except (ValueError, FileNotFoundError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(report.describe(), file=sys.stderr)
+        print(f"Sample index built at {scfg.store_dir} — your own index was not touched.\n",
+              file=sys.stderr)
+
+    generate_fn = None
+    if not cfg.llm_api_key:
+        print("No OPENROUTER_API_KEY in .env — showing retrieval only, no answer will be "
+              "written. Copy .env.example to .env and set the key to get a real answer.\n",
+              file=sys.stderr)
+        generate_fn = lambda q, c, cfg_: NO_KEY_SKIP  # noqa: E731
+
+    question = args.question or SAMPLE_QUESTION
+    store = open_store(scfg, scfg.default_preset)
+    try:
+        answer, record = log_ask(
+            question, scfg, store=store, embedder=embedder,
+            reranker=build_reranker(cfg.cross_encoder_model),
+            cache=AnswerCache(cache_path(scfg)) if cfg.cache.enabled else None,
+            generate_fn=generate_fn,
+        )
+    except Exception as exc:  # noqa: BLE001 - top level of a first run: name it, one line
+        print(f"The request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+
+    print(f"Q: {question}\n")
+    print(format_answer(answer, verbose=False, skipped=generate_fn is not None))
+    spent = (
+        "served from cache — $0" if record.cache_hit
+        else f"{record.usage['total_tokens']} tokens" if record.usage
+        else "no model call made"
+    )
+    print(f"\n[{record.request_id}  {record.timings.get('total', 0):.2f}s  {spent}]")
+    print("\nNext:")
+    print('  python -m rag_app ask --sample "When does a password reset link expire?"')
+    print("  python -m rag_app logs --sample            # every request you just made")
+    print("  python -m rag_app ui                       # add YOUR documents")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from rag_app.before_after import snapshot_dir
+    from rag_app.config import ROOT
+    from rag_app.report import load_dir, render_report
+    from rag_app.sample import sample_config
+
+    cfg = load_config()
+    located = [
+        *load_dir(snapshot_dir(cfg), "your corpus"),
+        *load_dir(snapshot_dir(sample_config(cfg)), "sample corpus"),
+    ]
+    out = Path(args.out) if args.out else ROOT / "docs" / "EVAL-REPORT.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_report(located), encoding="utf-8")
+    print(f"Wrote {out} from {len(located)} snapshot(s).")
+    return 0
+
+
+def _load_cfg(args):
+    """`load_config()`, redirected to the bundled sample corpus under --sample."""
+    cfg = load_config()
+    if getattr(args, "sample", False):
+        from rag_app.sample import sample_config
+
+        cfg = sample_config(cfg)
+    return cfg
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    from rag_app.pipeline import open_store
+    from rag_app.reqlog import AnswerCache, cache_path, log_ask
+
+    cfg = _load_cfg(args)
     flt = MetaFilter.parse(args.filter)
+    # The index is checked FIRST: discovering "no index" after a 150 MB model
+    # download is the worst possible first run, and it used to happen.
+    try:
+        store = open_store(cfg, args.preset or cfg.default_preset)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        if getattr(args, "sample", False):
+            print("Build the sample index first: python -m rag_app quickstart", file=sys.stderr)
+        return 1
+
+    generate_fn = None
+    if not cfg.llm_api_key:
+        # Without this, a gated question exits 0 with "I don't know" and the
+        # user never learns the key was missing. Same sentence the UI shows.
+        print("No OPENROUTER_API_KEY in .env — generation will be skipped.", file=sys.stderr)
+        generate_fn = lambda q, c, cfg_: NO_KEY_SKIP  # noqa: E731
+
     cache = AnswerCache(cache_path(cfg)) if cfg.cache.enabled else None
     # Always logged -- "nobody is watching your app" means this is not an
     # opt-in flag. Logging itself is free; `ask` already makes a real LLM
     # call when the gate passes, so there is no new cost here.
-    answer, record = log_ask(
-        args.question,
-        cfg,
-        preset=args.preset,
-        embedder=Embedder(cfg.bi_encoder_model),
-        reranker=build_reranker(cfg.cross_encoder_model),
-        flt=flt or None,
-        cache=cache,
-    )
-    print(format_answer(answer, verbose=not args.quiet))
+    try:
+        answer, record = log_ask(
+            args.question,
+            cfg,
+            preset=args.preset,
+            store=store,
+            embedder=Embedder(cfg.bi_encoder_model),
+            reranker=build_reranker(cfg.cross_encoder_model),
+            flt=flt or None,
+            cache=cache,
+            generate_fn=generate_fn,
+        )
+    except Exception as exc:  # noqa: BLE001 - the CLI's top level, named not hidden
+        # A rejected key, an account with no credit, or no network surfaces
+        # here as the openai SDK's own exception types (which cli.py must not
+        # import — llm.py is the only openai import site). Name the type so a
+        # genuine bug is still recognisable, in one line rather than a trace.
+        print(f"The request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    print(format_answer(answer, verbose=not args.quiet, skipped=generate_fn is not None))
     if not args.quiet:
         cost = (
             f", {record.usage['total_tokens']} tokens"
@@ -1179,7 +1391,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
 
 
 def cmd_chunks(args: argparse.Namespace) -> int:
-    cfg = load_config()
+    cfg = _load_cfg(args)
     names = sorted(cfg.chunk_presets) if args.all else [args.preset or cfg.default_preset]
 
     docs = load_docs(cfg.tickets_dir)
@@ -1298,6 +1510,9 @@ _HANDLERS = {
     "redteam": cmd_redteam,
     "mcp-serve": cmd_mcp_serve,
     "logs": cmd_logs,
+    "doctor": cmd_doctor,
+    "quickstart": cmd_quickstart,
+    "report": cmd_report,
 }
 
 

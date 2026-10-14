@@ -70,6 +70,14 @@ def test_matching_is_case_insensitive():
     assert g.found_in("cleared the invalid credentials cache") == ["Invalid Credentials"]
 
 
+def test_matching_ignores_line_breaks_from_pdf_extraction():
+    """Found live: the real PDF extracts as one word per line, so "18 widgets"
+    sat in the retrieved chunk as "18\\n\\nwidgets" and recall@3 reported it
+    missing on a run where it reached the model."""
+    g = parse_gold([{"question": "q", "must_contain": "x", "expect_in_chunk": "18 widgets"}])[0]
+    assert g.found_in("a dashboard\ncontaining\n\n18\n\nwidgets.") == ["18 widgets"]
+
+
 def test_an_answerable_question_with_nothing_to_look_for_is_rejected():
     """Otherwise it silently counts as a free pass in every metric."""
     with pytest.raises(ValueError, match="names nothing to look for"):
@@ -480,3 +488,44 @@ def test_the_json_summary_carries_the_new_metrics_as_none_until_asked():
     for key in ("judge_accuracy", "geval_mean", "disagreements", "substring_accuracy"):
         assert key in payload
         assert payload[key] is None
+
+
+def test_write_gold_keeps_the_files_leading_comment_block(tmp_path):
+    """`logs --promote-gold` rewrites data/gold.yaml; without this it silently
+    deleted the header where the file says it is an unverified DRAFT."""
+    from rag_app.evaluate import parse_gold, write_gold
+
+    path = tmp_path / "gold.yaml"
+    path.write_text(
+        "# DRAFT - not verified by a human.\n#\n# second line\n\n"
+        "- question: q1\n  must_contain: x\n",
+        encoding="utf-8",
+    )
+    write_gold(
+        [GoldQuestion(question="q1", must_contain=["x"]),
+         GoldQuestion(question="q2", must_contain=["y"])],
+        path,
+    )
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("# DRAFT - not verified by a human.\n#\n# second line\n")
+    import yaml
+
+    assert [g.question for g in parse_gold(yaml.safe_load(text))] == ["q1", "q2"]
+
+
+def test_write_gold_on_a_new_file_adds_no_header(tmp_path):
+    from rag_app.evaluate import write_gold
+
+    path = tmp_path / "new.yaml"
+    write_gold([GoldQuestion(question="q", must_contain=["x"])], path)
+    assert path.read_text(encoding="utf-8").startswith("- question: q")
+
+
+def test_the_json_summary_says_whether_a_real_model_wrote_the_answers():
+    """Without this a retrieval-only eval snapshot and a real-model one look
+    identical to anything reading the file later."""
+    import json as _json
+
+    g = GoldQuestion(question="q", must_contain=["x"])
+    dry = EvalReport(preset="C", k=10, n=3, results=[result(g, 1, 1)])
+    assert _json.loads(report_to_json(dry))["generated"] is False

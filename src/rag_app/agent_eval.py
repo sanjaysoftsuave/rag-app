@@ -33,6 +33,7 @@ from typing import Any
 import yaml
 
 from rag_app.config import AppConfig
+from rag_app.evaluate import fold
 
 TASKS_FILENAME = "agent_tasks.yaml"
 
@@ -224,8 +225,8 @@ class TaskResult:
 
     @property
     def answered(self) -> bool:
-        low = (self.result.text or "").lower()
-        return all(s.lower() in low for s in self.task.must_contain)
+        low = fold(self.result.text or "")
+        return all(fold(s) in low for s in self.task.must_contain)
 
     @property
     def cited(self) -> bool:

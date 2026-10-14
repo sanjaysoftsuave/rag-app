@@ -66,6 +66,20 @@ from rag_app.judge import geval_score, judge_answer
 from rag_app.pipeline import ask
 from rag_app.store import ScoredChunk
 
+
+def fold(text: str) -> str:
+    """Case- and whitespace-insensitive form for substring matching.
+
+    PDF extraction often emits each word on its own line, so the corpus holds
+    "18
+
+widgets" where the gold set says "18 widgets". Matching without
+    folding whitespace reported that snippet as never retrieved — recall@3
+    read 90.9% on a run where the chunk WAS in context. Found in Week 12 by
+    asking why a question with a "missing" snippet still answered correctly.
+    """
+    return " ".join(text.lower().split())
+
 GOLD_FILENAME = "gold.yaml"
 
 
@@ -116,9 +130,9 @@ class GoldQuestion:
         return self.expect_in_chunk or self.must_contain
 
     def found_in(self, text: str) -> list[str]:
-        """Which expected snippets appear in `text`, case-insensitively."""
-        low = text.lower()
-        return [s for s in self.snippets if s.lower() in low]
+        """Which expected snippets appear in `text`, ignoring case and whitespace."""
+        low = fold(text)
+        return [s for s in self.snippets if fold(s) in low]
 
 
 def _as_list(value: Any) -> list[str]:
@@ -199,7 +213,30 @@ def write_gold(questions: list[GoldQuestion], path: Path) -> None:
             entry["note"] = q.note
         payload.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    body = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    path.write_text(_leading_comments(path) + body, encoding="utf-8")
+
+
+def _leading_comments(path: Path) -> str:
+    """The file's leading `#` comment block, if it has one.
+
+    `write_gold` rewrites the whole file, and YAML has no comment round-trip.
+    Without this, `logs --promote-gold` — the failure-to-test step — silently
+    deleted `data/gold.yaml`'s header, which is where the file says it is a
+    DRAFT nobody has verified. Dropping an honesty marker as a side effect of
+    adding a test is the wrong trade.
+    """
+    if not path.exists():
+        return ""
+    kept: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or (kept and not line.strip()):
+            kept.append(line)
+            continue
+        break
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return ("\n".join(kept) + "\n\n") if kept else ""
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +294,8 @@ class QuestionResult:
         """Did the answer contain every string it was supposed to?"""
         if not self.gold.must_contain:
             return not self.refused
-        low = self.answer_text.lower()
-        return all(s.lower() in low for s in self.gold.must_contain)
+        low = fold(self.answer_text)
+        return all(fold(s) in low for s in self.gold.must_contain)
 
 
 @dataclass
@@ -755,8 +792,8 @@ def label_failures(
             )
             continue
 
-        low = answer.text.lower()
-        missing = [s for s in question.must_contain if s.lower() not in low]
+        low = fold(answer.text)
+        missing = [s for s in question.must_contain if fold(s) not in low]
         if missing:
             labels.append(
                 FailureLabel(
@@ -779,6 +816,10 @@ def report_to_json(report: EvalReport) -> str:
     return json.dumps(
         {
             "preset": report.preset,
+            # Whether a real model wrote the answers. Retrieval metrics are real
+            # either way; answer metrics only exist when this is true. Recorded
+            # so a snapshot can never be quoted as a real-model number it isn't.
+            "generated": report.generated,
             "k": report.k,
             "n": report.n,
             "hit_rate_at_k": round(report.hit_rate, 4),

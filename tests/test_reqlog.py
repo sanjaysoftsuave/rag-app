@@ -316,7 +316,46 @@ def test_find_by_id_returns_none_for_an_unknown_id():
 
 
 def test_cost_report_on_an_empty_log():
-    assert cost_report([]) == {"n_requests": 0, "cache_hit_rate": 0.0}
+    assert cost_report([]) == {
+        "generated": True, "n_requests": 0, "cache_hit_rate": 0.0, "planted_excluded": 0,
+    }
+
+
+def test_cost_report_records_whether_a_real_model_produced_it():
+    """The flag whose absence let a Week-10 agent number be quoted as a
+    Week-11 cache number. A snapshot must say what it is."""
+    assert cost_report([record()], generated=False)["generated"] is False
+    assert cost_report([record()])["generated"] is True
+
+
+def test_cost_report_excludes_planted_drill_entries():
+    """A fabricated drill record has no timings and no usage; averaging it in
+    drags every mean toward zero with a request that never happened."""
+    real = record(request_id="a", timings={"total": 2.0},
+                  usage={"prompt_tokens": 90, "completion_tokens": 10,
+                         "total_tokens": 100, "cost_usd": 0.01})
+    planted = record(request_id="p", planted_for_drill=True)
+    report = cost_report([real, planted])
+    assert report["n_requests"] == 1
+    assert report["planted_excluded"] == 1
+    assert report["mean_latency_s"] == 2.0
+    assert report["mean_tokens"] == 100.0
+
+
+def test_build_record_never_writes_the_log(tmp_path):
+    """The dry-run seam: shape without polluting the real request log."""
+    from rag_app.reqlog import build_record
+
+    embedder, store = seeded_store(tmp_path)
+    cfg = make_config(tmp_path, score_threshold=0.0)
+    answer, timings = instrumented_ask(
+        "how long?", cfg, embedder=embedder, reranker=FakeReranker(0.9), store=store,
+        generate_fn=lambda q, c, cfg_: "(dry run)",
+    )
+    store.close()
+    rec = build_record("how long?", cfg, answer, timings)
+    assert rec.answer_text == "(dry run)"
+    assert not log_path(cfg).exists()
 
 
 def test_cost_report_aggregates_latency_tokens_cost_and_cache_hits():

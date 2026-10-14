@@ -1,14 +1,13 @@
 tickets_dir: data/tickets
 store_dir: data/store
 
-# How text is windowed. Drop your files into tickets_dir — `.md`/`.txt` load as
-# documents cited by filename, `.pdf` loads as one citable source per page —
-# then build the index from the app's "Add documents" tab.
+# How text is windowed. Drop your files into tickets_dir — `.md`/`.txt`/`.pdf`
+# all load as documents cited by their filename (a PDF's pages are joined into
+# one text first) — then build the index from the app's "Add documents" tab.
 #
-# Every source is windowed on its own: a .md/.txt file as a whole, a PDF one
-# page at a time. Nothing is ever concatenated with anything else, so a chunk
-# can never contain text from two sources and a citation always names the one
-# place its text came from.
+# Every file is windowed on its own. Nothing is ever concatenated with another
+# file, so a chunk can never contain text from two sources and a citation
+# always names the one document its text came from.
 #
 # chunk_size is CHARACTERS, not tokens, and the embedding model has its own
 # ceiling. Above it the tail of every chunk is silently dropped before it is

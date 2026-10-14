@@ -2,9 +2,9 @@
 
 Streamlit needs a script path, and it executes that script directly rather
 than importing the package — so `src/` will not be on `sys.path` unless the
-project happens to be pip-installed. This repo's checked-in `.venv` is broken
-(see CLAUDE.md), which makes "happens to be installed" an unsafe assumption,
-so the path is added explicitly here.
+project happens to be pip-installed. Adding it explicitly means
+`streamlit run app.py` works from a fresh clone either way.
+`python -m rag_app ui` is the recommended launcher; it runs this file.
 
 The UI itself lives in `src/rag_app/ui.py` so it stays part of the package and
 its helpers remain importable by the test suite.
